@@ -12,7 +12,9 @@ title Coco
 
 rem ---- Settings. PORT must match BASE_URL in src\loop\agent.py ----
 set "MODEL=unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M"
-set "PORT=8080"
+rem Not 8080: other software grabs it at boot (here, the PEMHTTPD Apache service from EDB Postgres),
+rem and llama-server then can't start.
+set "PORT=8642"
 set "CONTEXT=16384"
 set "MAX_WAIT_SECONDS=600"
 rem Only copy CPU-held weights to the GPU for reads of 512+ tokens. Below that the copy costs more than
@@ -54,6 +56,11 @@ curl -s -f -o nul "http://127.0.0.1:%PORT%/health" && (echo llama-server is alre
 set "LLAMA_SERVER="
 for /d %%D in ("%~dp0llama-*") do if exist "%%D\llama-server.exe" set "LLAMA_SERVER=%%D\llama-server.exe"
 if not defined LLAMA_SERVER (echo Could not find llama-server.exe. Put the llama.cpp release folder ^(llama-...-bin-win-...^) next to coco.bat. & goto :fail)
+
+rem The port is free, or llama-server dies with "couldn't bind HTTP server socket" and Coco talks to the wrong server
+set "PORT_OWNER="
+for /f "delims=" %%O in ('powershell -NoProfile -Command "$c = Get-NetTCPConnection -LocalPort %PORT% -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; if ($c) { (Get-Process -Id $c.OwningProcess).ProcessName }"') do set "PORT_OWNER=%%O"
+if defined PORT_OWNER (echo Port %PORT% is already used by another program: %PORT_OWNER%. Close it, or change PORT here and BASE_URL in src\loop\agent.py. & goto :fail)
 
 if not exist logs mkdir logs
 echo Starting llama-server: %MODEL%

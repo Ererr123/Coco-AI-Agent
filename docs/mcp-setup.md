@@ -36,7 +36,7 @@ The model sees only these 7 tools. The filesystem server offers 16 tools, includ
 **Double-click [`coco.bat`](../coco.bat)** in the repo root. It:
 
 1. Checks for Python and Node.js, and installs the Python requirements if they're missing.
-2. Starts `llama-server` from the `llama-*` folder next to it, in a minimized window. If a server is already answering on port 8080, it uses that one.
+2. Starts `llama-server` from the `llama-*` folder next to it, in a minimized window. If a server is already answering on port 8642 (the PORT in `coco.bat`), it uses that one.
 3. Waits for the model to load, then runs Coco from the repo root (`notes\`, `memory.md`, `logs\`).
 4. Stops the llama-server it started when you type `quit`. A server you started yourself is left running.
 
