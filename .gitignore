@@ -8,7 +8,7 @@ notes/
 # Long-term memory: your preferences, facts and decisions
 memory.md
 # The agent's personality
-persona.md
+persona*.md
 # Your own MCP server additions (may name accounts or repos; tokens go in environment variables)
 src/loop/mcp_servers.local.json
 # Secrets, if you ever keep any in a file
@@ -25,6 +25,7 @@ credentials*.json
 # Eval run results: per-machine history used for "vs. previous run" comparisons
 src/loop/eval_results/
 src/loop/speed_results/
+src/loop/voice_results/
 __pycache__/
 *.pyc
 .venv/

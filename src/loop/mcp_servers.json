@@ -1,5 +1,27 @@
 {
   "_readme": "MCP servers Coco starts. No secrets here: use \"${env:NAME}\" for tokens. Only tools listed under \"tools\" reach the model. Put personal additions in mcp_servers.local.json (git-ignored). See docs/mcp-setup.md.",
+  "_tool_groups": "Servers listed in a group reach the model only once a conversation needs them: when a user message contains one of the keywords (whole words, any case) or matches one of the patterns (regular expressions; coding's matches owner/repo names like ggml-org/llama.cpp), or when the model calls load_tools. Then they stay for the rest of the conversation. Servers in no group are always loaded.",
+  "tool_groups": {
+    "email": {
+      "description": "search and read the user's Gmail",
+      "servers": ["gmail"],
+      "keywords": ["email", "emails", "e-mail", "e-mails", "gmail", "inbox", "mail", "mails", "unread", "newsletter", "newsletters"]
+    },
+    "github": {
+      "description": "the user's own GitHub account: their repositories, commits, issues and pull requests",
+      "servers": ["github"],
+      "keywords": ["github", "repo", "repos", "repository", "repositories", "commit", "commits", "pull request", "pull requests", "PR", "PRs"]
+    },
+    "coding": {
+      "description": "programming help: library documentation, Stack Overflow answers, and how open-source projects work",
+      "servers": ["deepwiki", "context7", "stackoverflow"],
+      "keywords": ["stack overflow", "stackoverflow", "library", "libraries", "docs", "documentation", "api", "sdk",
+                   "framework", "error", "exception", "traceback", "stack trace", "bug", "code", "coding",
+                   "programming", "python", "javascript", "typescript", "java", "rust", "golang", "c++", "c#",
+                   "npm", "pip", "package", "function", "compile", "compiler", "open-source", "open source"],
+      "patterns": ["(?<![\\w/.])(?!(?:and/or|either/or|n/a|w/o|km/h|notes)(?![\\w-]))[a-z][\\w-]*/(?=[\\w.-]*[a-z])[\\w-]+(?:\\.[\\w-]+)?(?![\\w/])"]
+    }
+  },
   "servers": {
     "notes": {
       "description": "Official MCP filesystem server, limited to the notes folder. Reviewed version, pinned.",
@@ -39,6 +61,7 @@
       "log_payloads": true,
       "tools": {
         "remember": {
+          "description": "Save a lasting preference, fact, or decision about the user to long-term memory. Call this EVERY time the user says 'remember' or tells you something lasting about themselves. This tool is the only way anything gets saved: replying 'got it' or 'I'll remember' without calling it saves nothing.",
           "arg_descriptions": {
             "fact": "One short sentence restating what the user told you about themselves.",
             "category": "Preferences = how the user likes things done. Facts = things about the user. Decisions = choices the user made."
@@ -62,19 +85,56 @@
       "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "${env:COCO_GITHUB_TOKEN}"},
       "log_payloads": false,
       "untrusted_content": true,
-      "drop_result_keys": ["id", "node_id", "html_url", "url", "avatar_url", "gravatar_id", "stargazers_count",
+      "drop_result_keys": ["id", "node_id", "full_name", "html_url", "url", "avatar_url", "gravatar_id", "stargazers_count",
                            "forks_count", "open_issues_count", "incomplete_results", "default_branch", "created_at"],
+      "_trimmed": "Schemas cut from ~13,000 to a fraction of that (they load mid-conversation, so every token is re-read): pagination, sorting and field selectors hidden; list sizes and returned fields fixed by the host, which also makes results smaller.",
       "tools": {
-        "get_me": {"name": "github_whoami", "description": "Get the user's own GitHub login and profile. It does not list repositories: use search_repositories with 'user:<login>' for that."},
+        "get_me": {"name": "github_whoami", "description": "Get the user's own GitHub login. It does not list repositories: use search_repositories with 'user:<login>' for that."},
         "search_repositories": {
-          "description": "Search GitHub repositories. To list the USER'S OWN repositories, first call github_whoami, then use the query 'user:<their login>'. Without user: this searches all of GitHub."
+          "description": "Search GitHub repositories. For the USER'S OWN repositories, call github_whoami first, then search 'user:<login>'. Without user: this searches all of GitHub.",
+          "fixed_args": {"minimal_output": true, "perPage": 30},
+          "hide_args": ["order", "page", "sort"],
+          "arg_descriptions": {"query": "GitHub search syntax, e.g. 'user:octocat' or 'machine learning language:python'."}
         },
-        "get_file_contents": {},
-        "list_commits": {},
-        "list_issues": {},
-        "issue_read": {},
-        "list_pull_requests": {},
-        "pull_request_read": {}
+        "get_file_contents": {
+          "description": "Read a file, or list a folder, in a GitHub repository.",
+          "fixed_args": {"fields": ["type", "name", "path", "size"]},
+          "hide_args": ["sha"],
+          "arg_descriptions": {"owner": "Repository owner.", "repo": "Repository name.", "path": "File or folder path; '/' for the top folder.",
+                               "ref": "Optional branch or tag, e.g. 'refs/heads/dev'."}
+        },
+        "list_commits": {
+          "description": "List the most recent commits of a GitHub repository (10, newest first).",
+          "fixed_args": {"perPage": 10, "fields": ["sha", "commit"]},
+          "hide_args": ["page", "sha", "author"],
+          "arg_descriptions": {"owner": "Repository owner.", "repo": "Repository name.", "path": "Optional: only commits touching this file.",
+                               "since": "Optional: only commits after this date (YYYY-MM-DD).", "until": "Optional: only commits before this date (YYYY-MM-DD)."}
+        },
+        "list_issues": {
+          "description": "List issues of a GitHub repository (10, open and closed unless state is given).",
+          "fixed_args": {"perPage": 10, "fields": ["number", "title", "state", "labels", "comments", "created_at", "updated_at"]},
+          "hide_args": ["after", "direction", "field_filters", "orderBy", "since"],
+          "arg_descriptions": {"owner": "Repository owner.", "repo": "Repository name.", "state": "Optional: OPEN or CLOSED.",
+                               "labels": "Optional: only issues with these labels."}
+        },
+        "issue_read": {
+          "description": "Read one GitHub issue: its details, comments, sub-issues, parent or labels.",
+          "hide_args": ["page", "perPage"],
+          "arg_descriptions": {"method": "get = details; get_comments; get_sub_issues; get_parent; get_labels.",
+                               "owner": "Repository owner.", "repo": "Repository name.", "issue_number": "The issue number."}
+        },
+        "list_pull_requests": {
+          "description": "List pull requests of a GitHub repository (10).",
+          "fixed_args": {"perPage": 10, "fields": ["number", "title", "state", "draft", "merged", "user", "created_at", "updated_at", "merged_at"]},
+          "hide_args": ["base", "direction", "head", "page", "sort"],
+          "arg_descriptions": {"owner": "Repository owner.", "repo": "Repository name.", "state": "open, closed or all."}
+        },
+        "pull_request_read": {
+          "description": "Read one GitHub pull request: details, diff, changed files, commits, comments, reviews or CI status.",
+          "hide_args": ["after", "page", "perPage"],
+          "arg_descriptions": {"method": "get = details; get_diff; get_files; get_commits; get_comments (general); get_reviews; get_review_comments (code review threads); get_status / get_check_runs (CI).",
+                               "owner": "Repository owner.", "repo": "Repository name.", "pullNumber": "The pull request number."}
+        }
       }
     },
     "gmail": {
@@ -87,6 +147,94 @@
       "tools": {
         "search_emails": {},
         "read_email": {}
+      }
+    },
+    "web": {
+      "description": "Web search through a local SearXNG (Docker container coco-searxng on 127.0.0.1:8888, see docs/mcp-setup.md) via the mcp-searxng server. Free, no account or key. Pages are untrusted (prompt injection) and capped in size. web_url_read refuses private/internal addresses by default. Off by default: enable in mcp_servers.local.json once SearXNG is set up.",
+      "enabled": false,
+      "command": "npx",
+      "args": ["-y", "mcp-searxng@2.10.0"],
+      "env": {"SEARXNG_URL": "http://127.0.0.1:8888"},
+      "log_payloads": true,
+      "untrusted_content": true,
+      "tools": {
+        "searxng_web_search": {
+          "name": "web_search",
+          "description": "Search the web for current or general information that isn't in your memory or the user's notes/email: news, facts, prices, how-tos, docs. Returns titles, URLs and short snippets. Snippets are often enough to answer; read a page with read_web_page when they aren't. Snippets can be months old: for 'latest', 'current' or 'newest' questions, read the most official result (e.g. the project's own site) before answering.",
+          "fixed_args": {"num_results": 6, "result_detail": "compact", "response_format": "text"},
+          "hide_args": ["pageno", "pages", "language", "safesearch", "min_score", "categories", "engines"],
+          "arg_descriptions": {
+            "query": "Plain search keywords, like you'd type into a search engine.",
+            "time_range": "Only for recent news: 'day', 'week', 'month' or 'year'. Leave out otherwise."
+          }
+        },
+        "web_url_read": {
+          "name": "read_web_page",
+          "description": "Open a web page (a search result, or a link the user gave) and return its text. Long pages are cut off.",
+          "fixed_args": {"maxLength": 8000},
+          "hide_args": ["startChar", "section", "paragraphRange", "readHeadings"],
+          "arg_descriptions": {"url": "The full http(s) URL of the page."}
+        }
+      }
+    },
+    "deepwiki": {
+      "description": "DeepWiki (Cognition), remote and free, no account: AI-written wikis of public GitHub repositories. Only ask_wiki_question is exposed; read_wiki_contents returns whole wikis, far too big for the context. Answers can take ~1 minute. Off by default.",
+      "enabled": false,
+      "url": "https://mcp.deepwiki.com/mcp",
+      "timeout": 120,
+      "log_payloads": true,
+      "untrusted_content": true,
+      "max_result_chars": 8000,
+      "tools": {
+        "ask_wiki_question": {
+          "name": "ask_repo_docs",
+          "description": "Ask how a PUBLIC open-source GitHub project works (its code, architecture, options), answered from DeepWiki's wiki of that repository. Not for the user's own repositories (use the GitHub tools) or general web questions. Can take up to a minute.",
+          "arg_descriptions": {
+            "repoName": "The repository as owner/repo, e.g. 'ggml-org/llama.cpp'.",
+            "question": "One specific question about that repository."
+          }
+        }
+      }
+    },
+    "context7": {
+      "description": "Context7 (Upstash), remote and free: current documentation and code examples for programming libraries. Works without a key at a low hourly rate limit; a free key raises it (see docs/mcp-setup.md). Queries go to Context7, so never put private data in them. Off by default.",
+      "enabled": false,
+      "url": "https://mcp.context7.com/mcp",
+      "timeout": 60,
+      "log_payloads": true,
+      "untrusted_content": true,
+      "max_result_chars": 8000,
+      "tools": {
+        "resolve-library-id": {
+          "name": "find_library",
+          "description": "Step 1 for questions about using a programming library or framework (e.g. 'how do I stream with the openai Python SDK'): find its Context7 library id. Then call read_library_docs with that id.",
+          "arg_descriptions": {
+            "libraryName": "The library or framework name, e.g. 'next.js' or 'openai python'.",
+            "query": "What the user wants to do with it, in a few words. No private data."
+          }
+        },
+        "query-docs": {
+          "name": "read_library_docs",
+          "description": "Step 2: read current docs and code examples for a library id from find_library (format '/org/project').",
+          "arg_descriptions": {
+            "libraryId": "The exact library id from find_library, e.g. '/vercel/next.js'.",
+            "query": "One specific topic to look up, e.g. 'streaming responses'. No private data."
+          }
+        }
+      }
+    },
+    "stackoverflow": {
+      "description": "Coco's own read-only Stack Overflow server (stackoverflow_server.py) on the public Stack Exchange API. Free and keyless (~300 requests/day per IP); a free app key in STACKEXCHANGE_KEY raises it to 10,000 (see docs/mcp-setup.md). Off by default.",
+      "enabled": false,
+      "command": "{python}",
+      "args": ["{here}/stackoverflow_server.py"],
+      "log_payloads": true,
+      "untrusted_content": true,
+      "tools": {
+        "search_stackoverflow": {
+          "description": "Search Stack Overflow for a programming error message or coding problem. Returns question ids, titles, scores and whether they have an accepted answer. Then read the best one with read_stackoverflow_answers."
+        },
+        "read_stackoverflow_answers": {}
       }
     }
   }

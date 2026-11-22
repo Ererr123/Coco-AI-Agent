@@ -5,11 +5,13 @@ the server that advertised it.
 
 The agent loop stays synchronous. The MCP SDK is async, so the host runs one asyncio
 event loop on a background thread and keeps one long-lived task per server (each task
-owns its stdio subprocess and ClientSession from start to shutdown).
+owns its transport and ClientSession from start to shutdown). Local servers run as stdio
+subprocesses ("command"); remote ones are reached over MCP Streamable HTTP ("url", https only).
 
 Safety rules enforced here, whatever a server offers:
   - Only tools listed under a server's "tools" in the config reach the model (allowlist).
   - "fixed_args" are always set by the host; the model cannot see or override them.
+  - "hide_args" are removed from the schema and dropped from calls: the model can't use them.
   - Every failure (startup, unknown tool, bad JSON, server error, timeout, crash) comes
     back as text starting with "Error:" and ok=False. Nothing is reported as a success
     unless the server actually returned a successful result.
@@ -18,17 +20,20 @@ Safety rules enforced here, whatever a server offers:
 """
 
 import asyncio
+import contextlib
 import json
 import os
 import re
-import sys
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from urllib.parse import urlparse
+
 from mcp import ClientSession, StdioServerParameters, stdio_client
+from mcp.client.streamable_http import create_mcp_http_client, streamable_http_client
 from mcp.types import PaginatedRequestParams
 
 STARTUP_TIMEOUT_S = 60     ## First run of an npx server downloads it, so allow a while
@@ -47,24 +52,42 @@ class ConfigError(Exception):
     """The server configuration is invalid (bad file, missing env var, bad tool settings)."""
 
 
-def load_config(path: Path, local_path: Path | None = None) -> dict[str, dict]:
-    ## Read the checked-in config, then let an optional, git-ignored local file add servers or
-    ## change settings of existing ones by name: {"servers": {"github": {"enabled": true}}}.
+def _merged_section(key: str, path: Path, local_path: Path | None, required: bool) -> dict[str, dict]:
+    ## One section ("servers" or "tool_groups") of the checked-in config, with the optional,
+    ## git-ignored local file adding entries or changing settings of existing ones by name,
+    ## key by key: {"servers": {"github": {"enabled": true}}}.
     def read(p: Path) -> dict:
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as e:
             raise ConfigError(f"Could not read MCP config {p}: {e}") from None
-        servers = data.get("servers")
-        if not isinstance(servers, dict):
-            raise ConfigError(f"{p} must contain a \"servers\" object")
-        return servers
+        section = data.get(key, None if required and p == path else {})
+        if not isinstance(section, dict):
+            raise ConfigError(f"{p} must contain a \"{key}\" object")
+        return section
 
-    servers = read(path)
+    merged = read(path)
     if local_path is not None and local_path.exists():
         for name, spec in read(local_path).items():
-            servers[name] = servers.get(name, {}) | spec  ## Local settings win, key by key
-    return servers
+            merged[name] = merged.get(name, {}) | spec  ## Local settings win, key by key
+    return merged
+
+
+def load_config(path: Path, local_path: Path | None = None) -> dict[str, dict]:
+    return _merged_section("servers", path, local_path, required=True)
+
+
+def load_tool_groups(path: Path, local_path: Path | None = None) -> dict[str, dict]:
+    ## Optional "tool_groups" next to "servers": servers whose tools reach the model only when a
+    ## conversation needs them (see agent.tools_for).
+    ## {"email": {"description": "...", "servers": ["gmail"], "keywords": ["email", "inbox"]}}
+    groups = _merged_section("tool_groups", path, local_path, required=False)
+    for name, spec in groups.items():
+        if not (isinstance(spec.get("description"), str) and isinstance(spec.get("servers"), list)
+                and isinstance(spec.get("keywords", []), list)):
+            raise ConfigError(f"tool group '{name}' needs a \"description\", a \"servers\" list "
+                              "and optionally a \"keywords\" list")
+    return groups
 
 
 def describe(error: BaseException) -> str:
@@ -76,12 +99,19 @@ def describe(error: BaseException) -> str:
 
 
 @dataclass
+class HttpServerParameters:
+    url: str                 ## Remote MCP endpoint (Streamable HTTP)
+    headers: dict            ## e.g. an API key from ${env:...}; empty for public servers
+
+
+@dataclass
 class ExposedTool:
     model_name: str          ## What the model calls it (unique across all servers)
     server: str              ## Which server owns it
     tool: str                ## The server's own name for it
     schema: dict             ## OpenAI function-tool schema sent to the model
     fixed_args: dict = field(default_factory=dict)
+    hidden_args: list = field(default_factory=list)
 
 
 @dataclass
@@ -171,7 +201,7 @@ class MCPHost:
             self._loop.close()
         self._loop = None
         self.tools = {}
-        if self._errlog is not None and self._errlog is not sys.stderr:
+        if self._errlog is not None:
             self._errlog.close()
             self._errlog = None
 
@@ -184,8 +214,16 @@ class MCPHost:
 
     ## ---------- what the model sees ----------
 
-    def tool_schemas(self) -> list[dict]:
-        return [t.schema for t in self.tools.values()]
+    def tool_schemas(self, servers: set | None = None) -> list[dict]:
+        ## All exposed tools, or only those of the given servers (in the same stable order)
+        return [t.schema for t in self.tools.values() if servers is None or t.server in servers]
+
+    def server_of(self, tool_name: str) -> str | None:
+        tool = self.tools.get(tool_name)
+        return tool.server if tool else None
+
+    def running_servers(self) -> set:
+        return {name for name, server in self.servers.items() if server.session is not None}
 
     def status(self) -> dict[str, str]:
         ## Per-server state for display: "running (n tools)" or the failure reason.
@@ -216,7 +254,8 @@ class MCPHost:
             return fail(f"Invalid JSON arguments: {raw_args}")
         if not isinstance(args, dict):
             return fail("Arguments must be a JSON object.")
-        args = {k: v for k, v in args.items() if k not in tool.fixed_args} | tool.fixed_args
+        args = {k: v for k, v in args.items()
+                if k not in tool.fixed_args and k not in tool.hidden_args} | tool.fixed_args
 
         session = server.session
         if session is None or self._loop is None:
@@ -235,8 +274,10 @@ class MCPHost:
         text = self._render(result)
         if not result.is_error and server.spec.get("drop_result_keys"):
             text = self._drop_keys(text, set(server.spec["drop_result_keys"]))
-        if len(text) > MAX_RESULT_CHARS:
-            text = text[:MAX_RESULT_CHARS] + f"\n[...result cut off at {MAX_RESULT_CHARS} characters...]"
+        ## Per-server "max_result_chars" (e.g. docs servers) can only lower the global cap
+        limit = min(int(server.spec.get("max_result_chars", MAX_RESULT_CHARS)), MAX_RESULT_CHARS)
+        if len(text) > limit:
+            text = text[:limit] + f"\n[...result cut off at {limit} characters...]"
         if result.is_error:
             return fail(ERROR_PREFIX.sub("", text).strip() or "The tool reported an error.")
         if server.spec.get("untrusted_content", False):
@@ -257,12 +298,24 @@ class MCPHost:
             return os.environ[name]
         return ENV_REF.sub(env, value)
 
-    def _params(self, server: _Server) -> StdioServerParameters:
+    def _params(self, server: _Server) -> "StdioServerParameters | HttpServerParameters":
         spec = server.spec
-        if not isinstance(spec.get("command"), str):
-            raise ConfigError("no \"command\" configured")
         if not isinstance(spec.get("tools", {}), dict):
             raise ConfigError("\"tools\" must be an object of tool name -> settings")
+        if "url" in spec:
+            ## A remote server over MCP Streamable HTTP. HTTPS only, so nothing (including any
+            ## key in the headers) crosses the network in clear text; plain http only to this PC.
+            if "command" in spec:
+                raise ConfigError("set either \"command\" (local) or \"url\" (remote), not both")
+            url = self._expand(spec["url"])
+            parsed = urlparse(url)
+            if not (parsed.scheme == "https" or
+                    (parsed.scheme == "http" and parsed.hostname in ("127.0.0.1", "localhost", "::1"))):
+                raise ConfigError(f"url must be https:// (plain http only for 127.0.0.1): {url}")
+            return HttpServerParameters(
+                url=url, headers={k: self._expand(v) for k, v in spec.get("headers", {}).items()})
+        if not isinstance(spec.get("command"), str):
+            raise ConfigError("no \"command\" (local server) or \"url\" (remote server) configured")
         return StdioServerParameters(
             command=self._expand(spec["command"]),
             args=[self._expand(a) for a in spec.get("args", [])],
@@ -270,13 +323,22 @@ class MCPHost:
             cwd=self._expand(spec["cwd"]) if spec.get("cwd") else None,
         )
 
-    async def _run(self, server: _Server, params: StdioServerParameters) -> None:
+    async def _run(self, server: _Server, params: "StdioServerParameters | HttpServerParameters") -> None:
         ## One task per server, for its whole life: anyio requires a session's context to be
         ## entered and exited in the same task.
         server.stop = asyncio.Event()
-        self._log(f"starting server '{server.name}': {params.command}")
         try:
-            async with stdio_client(params, errlog=self._errlog) as (read, write):
+            async with contextlib.AsyncExitStack() as stack:
+                if isinstance(params, HttpServerParameters):
+                    self._log(f"connecting to server '{server.name}': {params.url}")
+                    ## Our own client only when headers are needed (the SDK then leaves closing it to us)
+                    client = (await stack.enter_async_context(create_mcp_http_client(headers=params.headers))
+                              if params.headers else None)
+                    transport = streamable_http_client(params.url, http_client=client)
+                else:
+                    self._log(f"starting server '{server.name}': {params.command}")
+                    transport = stdio_client(params, errlog=self._errlog)
+                read, write = await stack.enter_async_context(transport)
                 async with ClientSession(read, write) as session:
                     await session.initialize()
                     server.tools = await self._list_tools(session)
@@ -348,10 +410,15 @@ class MCPHost:
         for prop in props.values():
             if isinstance(prop, dict):
                 prop.pop("title", None)
+                for key in [k for k in prop if k.startswith("x-")]:
+                    del prop[key]  ## Vendor extensions (e.g. GitHub's x-mcp-header): tokens the model can't use
         required = schema.get("required", [])
 
         fixed = settings.get("fixed_args", {})
         hidden = settings.get("hide_args", [])
+        for arg in [*fixed, *hidden]:
+            if arg not in props:  ## A typo would otherwise be sent to the server on every call
+                raise ConfigError(f"no argument '{arg}' to fix or hide")
         for arg in hidden:
             if arg in required:
                 raise ConfigError(f"cannot hide required argument '{arg}'")
@@ -365,7 +432,7 @@ class MCPHost:
             props[arg]["description"] = text
 
         return ExposedTool(
-            model_name=model_name, server=server_name, tool=tool.name, fixed_args=fixed,
+            model_name=model_name, server=server_name, tool=tool.name, fixed_args=fixed, hidden_args=list(hidden),
             schema={"type": "function", "function": {
                 "name": model_name,
                 "description": settings.get("description", tool.description or ""),

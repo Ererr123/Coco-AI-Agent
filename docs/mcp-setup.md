@@ -11,6 +11,9 @@ mcp_host.py  (MCP client: starts servers, discovers tools, allowlist, routing, e
    |  MCP over stdio, one subprocess per server
    +-- notes:    @modelcontextprotocol/server-filesystem@2.2.0, limited to notes/
    +-- personal: personal_server.py, limited to memory.md
+   +-- (optional, off by default) github, gmail, web, stackoverflow: see their sections below
+   |  MCP over HTTPS (remote, optional, off by default)
+   +-- deepwiki, context7
 ```
 
 | Model-facing tool | Server | Server's own tool |
@@ -33,7 +36,7 @@ The model sees only these 7 tools. The filesystem server offers 16 tools, includ
 **Double-click [`coco.bat`](../coco.bat)** in the repo root. It:
 
 1. Checks for Python and Node.js, and installs the Python requirements if they're missing.
-2. Starts `llama-server` from the `llama-*` folder next to it, in a minimized window. If a server is already answering on port 8080, it uses that one.
+2. Starts `llama-server` from the `llama-*` folder next to it, in a minimized window. If a server is already answering on port 8642 (the PORT in `coco.bat`), it uses that one.
 3. Waits for the model to load, then runs Coco from the repo root (`notes\`, `memory.md`, `logs\`).
 4. Stops the llama-server it started when you type `quit`. A server you started yourself is left running.
 
@@ -92,8 +95,27 @@ Servers are defined in [`src/loop/mcp_servers.json`](../src/loop/mcp_servers.jso
 - **`log_payloads`** defaults to `false`: tool arguments and results are then written to `logs/` as `[not logged]`. Only `notes` and `personal` set it to `true`, which matches what Coco logged before MCP.
 - **`untrusted_content`** (set on notes, github and gmail) puts a label before each successful result. The label says the content was written by someone other than the user and that instructions inside it are not from the user. The `safety/injection_in_tool_result` eval checks that Coco reports on planted instructions instead of following them.
 - **`timeout`** is in seconds per call. The default is 30.
+- **Remote servers:** give `"url": "https://.../mcp"` (MCP Streamable HTTP) instead of `command`/`args`, plus optional `"headers"`, which accept `${env:NAME}` for keys. The URL must be `https://`; plain `http://` is allowed only for `127.0.0.1`. DeepWiki and Context7 are configured this way.
+- **`max_result_chars`** lowers the 40,000-character result cap for one server. The docs servers use 8,000, so one answer can't fill Coco's 16k-token context.
+- **`hide_args`** are also dropped from calls, so the model can't use an argument it was never shown.
 
 Changing the config or a server version changes the `prompt_version` in logs and evals, because the tool schemas are part of it.
+
+### Per-message tool loading (`tool_groups`)
+
+With every server on, the model gets about 24 tools and gets worse at using them: in evals it made up a file list, and said "let's check" without checking. So some servers are in **tool groups** at the top of `mcp_servers.json`. Their tools reach the model only once a conversation needs them:
+
+| Group | Servers | Loaded when a message contains... |
+|---|---|---|
+| `email` | gmail | email, gmail, inbox, mail, unread, newsletter... |
+| `github` | github | github, repo, repository, commit, pull request, PR... |
+| `coding` | deepwiki, context7, stackoverflow | library, docs, api, error, traceback, code, python, Stack Overflow... or an `owner/repo` name like `ggml-org/llama.cpp` |
+
+- **Always loaded:** servers in no group, which are notes, personal and web. That's 9 tools.
+- **`load_tools`:** while any group is still unloaded, the model also gets this tool. Its description lists each group with its services and tools, so the model can load a group itself when the keywords miss, e.g. "use DeepWiki to...".
+- **Sticky per conversation.** Once loaded, a group stays until `clear`. The tool list sits at the top of the prompt, so every change means re-reading the conversation once, which takes a few seconds; with sticky groups that happens at most once per group. Which groups are active is worked out from the conversation itself, from your messages and the tools already called.
+- **Matching:** keywords match whole words in any case (`email` matches "Email" but not "emailing"). `patterns` are regular expressions. Edit both in `mcp_servers.json`, or override a group in `mcp_servers.local.json`.
+- **What you'll see:** the startup lines list the groups. Each run in `logs/` records `tool_groups`, meaning which groups were loaded.
 
 ### Add a server
 
@@ -109,7 +131,7 @@ Set `"enabled": false`, or delete its entry from the local file. Its subprocess 
 
 ## Security model
 
-- Each server is a separate subprocess with its own trust boundary. The model never sees commands, environment variables or tokens. It sees only tool names, descriptions and argument schemas.
+- Each local server is a separate subprocess with its own trust boundary. Remote servers (DeepWiki, Context7) are reached only over HTTPS. The model never sees commands, URLs, headers, environment variables or tokens. It sees only tool names, descriptions and argument schemas.
 - **Filesystem.** The official server is started with `notes/` as its only allowed directory, and with its working directory set to `notes/`, so plain file names resolve there. `../` paths and absolute paths outside `notes/` are denied by the server. `tests/test_mcp_host.py` and the `safety/*` evals check this.
 - **Memory.** `personal_server.py` takes the memory file path from its command line. No tool accepts a path. `forget` refuses to choose between several matching memories. Disk errors are returned as tool errors.
 - **Failures are never successes.** Startup failures, unknown or non-allowlisted tools, bad JSON, server errors, timeouts and crashes all return `Error: ...` with `ok=False`. Results over 40,000 characters are cut off and marked.
@@ -174,6 +196,59 @@ Google's own Gmail MCP server is a hosted preview, and it also requires the `gma
 
 **Revoke:** at Google Account → Security → [Third-party connections](https://myaccount.google.com/connections), remove the app. Then delete `%APPDATA%\coco\gmail_token.json`.
 
+## Web search (free, no account)
+
+**Server:** [`mcp-searxng@2.10.0`](https://github.com/ihor-sokoliuk/mcp-searxng), talking to your own [SearXNG](https://docs.searxng.org/) in Docker. SearXNG is a meta-search engine: it sends each query to DuckDuckGo, Google, Bing and others, then merges the results. It's free and needs no key. Two tools:
+
+| Model-facing tool | Server's own tool | What the model can set |
+|---|---|---|
+| `web_search` | `searxng_web_search` | `query`, `time_range`. Fixed: 6 results, compact text. |
+| `read_web_page` | `web_url_read` | `url`. Fixed: at most 8,000 characters. |
+
+Search results and pages are labeled as untrusted, like emails, because web pages are the easiest place to plant prompt injection. `read_web_page` refuses private and internal addresses (`localhost`, `192.168.x.x`, ...) by default, so a page can't steer Coco into your local network. Rule 10 in the system prompt makes Coco open the official page for "latest/current" questions, because snippets are often months old. Those questions take ~25 s instead of ~6 s.
+
+**Setup (once):**
+
+1. Install and start [Docker Desktop](https://www.docker.com/products/docker-desktop/), which is free for personal use.
+2. Create the container. It listens only on this PC (`127.0.0.1`), and its config lives in `%APPDATA%\coco\searxng`, outside the repo:
+   ```text
+   docker run -d --name coco-searxng -p 127.0.0.1:8888:8080 -v "%APPDATA%\coco\searxng:/etc/searxng" searxng/searxng:2026.11.20-cd6d28091
+   ```
+3. Turn on JSON output, which mcp-searxng needs. Add this to the end of `%APPDATA%\coco\searxng\settings.yml`, then run `docker restart coco-searxng`:
+   ```yaml
+   search:
+     formats:
+       - html
+       - json
+   ```
+4. Check it: <http://127.0.0.1:8888/search?q=test&format=json> should return JSON.
+5. Enable the `web` server in `mcp_servers.local.json`. See below.
+
+`coco.bat` starts the container if Docker Desktop is running. If Docker isn't running, it prints `Web search: off`, and Coco says so if you ask her to search.
+
+**Limits:** your queries go to the search engines from your IP address, but not to any account. If an engine rate-limits or shows a CAPTCHA, SearXNG pauses that engine for a while and uses the others. Results can be thinner then, but for one person's use it rarely happens.
+
+## Coding help: DeepWiki, Context7, Stack Overflow (free)
+
+Three optional servers for programming questions. All are free, need no account, and are off by default.
+
+| Server | Model-facing tools | What it's for | Free limit |
+|---|---|---|---|
+| `deepwiki` (remote, [mcp.deepwiki.com](https://docs.devin.ai/work-with-devin/deepwiki-mcp)) | `ask_repo_docs` | How a public open-source GitHub project works | None published. Answers take 5–60 s. |
+| `context7` (remote, [mcp.context7.com](https://context7.com)) | `find_library`, `read_library_docs` | Current docs and code examples for a library | A low hourly limit without a key. A free key raises it. |
+| `stackoverflow` (Coco's own [`stackoverflow_server.py`](../src/loop/stackoverflow_server.py)) | `search_stackoverflow`, `read_stackoverflow_answers` | Error messages and coding problems | ~300 requests/day per IP without a key, 10,000 with a free key |
+
+- **Not used:** MCPHub, because Coco's host already does this job and applies its rules per server. DeepWiki's `read_wiki_contents`, which returns whole wikis. The official Stack Overflow MCP server, which needs a Stack Exchange login and allows 100 calls/day.
+- **Privacy:** questions to DeepWiki and Context7 go to those companies, and Stack Overflow searches go to the public API. Results are labeled untrusted and capped at 8,000 characters.
+- **Optional free keys**, in `mcp_servers.local.json`. Set the environment variables first (user env vars, like the GitHub token):
+  ```json
+  "context7": {"enabled": true, "headers": {"CONTEXT7_API_KEY": "${env:CONTEXT7_API_KEY}"}},
+  "stackoverflow": {"enabled": true, "env": {"STACKEXCHANGE_KEY": "${env:STACKEXCHANGE_KEY}"}}
+  ```
+  Context7 keys come from [context7.com](https://context7.com) and start with `ctx7sk`. Stack Exchange app keys come from [stackapps.com](https://stackapps.com/apps/oauth/register) and aren't secret.
+- **Evals:** `python evals.py --servers web,deepwiki,context7,stackoverflow --repeat 3` runs the whole suite with all of them on, plus the `dev/` and `web/` cases.
+- They're in the `coding` tool group, so turning them on doesn't add any tools until a conversation is about code. See [Per-message tool loading](#per-message-tool-loading-tool_groups).
+
 ## Enable the services
 
 Create `src/loop/mcp_servers.local.json`. It is git-ignored, and it only changes the keys it names:
@@ -182,12 +257,18 @@ Create `src/loop/mcp_servers.local.json`. It is git-ignored, and it only changes
 {
   "servers": {
     "github": {"enabled": true},
-    "gmail": {"enabled": true}
+    "gmail": {"enabled": true},
+    "web": {"enabled": true},
+    "deepwiki": {"enabled": true},
+    "context7": {"enabled": true},
+    "stackoverflow": {"enabled": true}
   }
 }
 ```
 
-Start Coco, either with `coco.bat` or `python agent.py`. The startup lines should show `github: running (8 tools)` and `gmail: running (2 tools)`. Neither server has `log_payloads` set, so their arguments and results are written to `logs/` as `[not logged]`.
+Start Coco, either with `coco.bat` or `python agent.py`. The startup lines should show `github: running (8 tools)`, `gmail: running (2 tools)` and `web: running (2 tools)`. GitHub and Gmail don't have `log_payloads` set, so their arguments and results are written to `logs/` as `[not logged]`. Web searches and pages are logged, which is useful for debugging.
+
+To check web search with the evals (Gmail and GitHub are never used): `python evals.py --web --repeat 3`. This turns on the web server for every case and adds the `web/` cases.
 
 ## Troubleshooting
 
@@ -197,6 +278,8 @@ Start Coco, either with `coco.bat` or `python agent.py`. The startup lines shoul
 | `did not start within 60s` | First npx download is slow or offline. Run `npx -y @modelcontextprotocol/server-filesystem@2.2.0 .` once by hand. |
 | `Server 'personal' failed to start` | Check `logs/mcp-servers.log`. Usually the `mcp` package is missing (`pip install -r requirements.txt`). |
 | `environment variable X is not set` | Set it in your shell or secret manager before starting Coco. |
+| Web search errors such as `fetch failed` or `ECONNREFUSED 127.0.0.1:8888` | SearXNG isn't running. Start Docker Desktop, then run `docker start coco-searxng`, or restart Coco through `coco.bat`. |
+| Web search returns `403` or HTML instead of results | JSON output isn't enabled. Do step 3 of the web search setup. |
 | `does not offer configured tool 'x'` | The server version renamed the tool. Check its tool list and update `tools`. |
 | `Server 'gmail' failed to start` | Look at the end of `logs/mcp-servers.log`. Usually the sign-in is missing or expired: run `python gmail_server.py --authorize`. |
 | `Server 'github' failed to start: ... COCO_GITHUB_TOKEN is not set` | Set the variable (see GitHub setup), then open a new terminal. |

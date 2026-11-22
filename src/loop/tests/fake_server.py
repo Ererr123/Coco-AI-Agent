@@ -1,7 +1,8 @@
 """
 A fake MCP server for testing mcp_host.py without real services or accounts.
 
-    python fake_server.py [server-name]
+    python fake_server.py [server-name]                 (stdio)
+    python fake_server.py [server-name] --http PORT     (Streamable HTTP on 127.0.0.1:PORT/mcp)
 
 Its tools misbehave on purpose: errors, slowness, crashes, huge output.
 """
@@ -25,6 +26,11 @@ def echo(text: str) -> str:
 @server.tool(description="Add two integers.")
 def add(a: int, b: int) -> str:
     return str(a + b)
+
+
+@server.tool(description="Greet someone, optionally loudly.")
+def greet(name: str, shout: bool = False) -> str:
+    return f"HELLO {name.upper()}" if shout else f"hello {name}"
 
 
 @server.tool(description="List files in a folder.")
@@ -64,4 +70,7 @@ def delete_everything() -> str:
 
 
 if __name__ == "__main__":
-    server.run("stdio")
+    if "--http" in sys.argv:  ## python fake_server.py name --http PORT: a "remote" server on this PC
+        server.run("streamable-http", port=int(sys.argv[sys.argv.index("--http") + 1]))
+    else:
+        server.run("stdio")

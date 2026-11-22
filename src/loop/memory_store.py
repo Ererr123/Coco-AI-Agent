@@ -1,7 +1,7 @@
 """
 Coco's long-term memory: a plain markdown file you can open and edit any time.
 
-Shared by agent.py (which puts memory into the system prompt every turn) and
+Shared by agent.py (which puts memory into the system prompt when a conversation starts) and
 personal_server.py (the MCP server that gives the model remember/forget/list_memories).
 Every function takes the memory file path explicitly, so nothing here can be pointed
 at an arbitrary file by the model: the path is chosen by whoever starts the server.
@@ -17,7 +17,7 @@ MEMORY_SECTIONS = ["Preferences", "Facts", "Decisions"]  ## The categories memor
 MEMORY_TEMPLATE = (
     "# Agent Memory\n\n"
     "_This file is the agent's long-term memory. Edit it freely: one bullet per memory. "
-    "It is reloaded at the start of every turn._\n\n"
+    "It is reloaded at the start of every conversation._\n\n"
     + "".join(f"## {section}\n\n" for section in MEMORY_SECTIONS)
 )
 

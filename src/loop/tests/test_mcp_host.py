@@ -131,6 +131,25 @@ class Configuration(unittest.TestCase):
             self.assertEqual(names(host), ["add"])
             self.assertTrue(any("cannot hide required" in p for p in host.problems))
 
+    def test_fixing_or_hiding_an_unknown_argument_is_a_config_error(self):
+        with MCPHost({"fake": fake(tools={"echo": {"fixed_args": {"txet": "typo"}},
+                                         "greet": {"hide_args": ["shuot"]}, "add": {}})}) as host:
+            self.assertEqual(names(host), ["add"])
+            self.assertEqual(sum("no argument" in p for p in host.problems), 2)
+
+    def test_per_server_result_cap(self):
+        with MCPHost({"fake": fake(tools={"big": {}}, max_result_chars=100)}) as host:
+            text = host.call("big", '{"size": 5000}').text
+            self.assertTrue(text.startswith("x" * 100))
+            self.assertIn("cut off at 100 characters", text)
+
+    def test_hidden_args_are_dropped_from_calls(self):
+        with MCPHost({"fake": fake(tools={"greet": {"hide_args": ["shout"]}})}) as host:
+            params = host.tool_schemas()[0]["function"]["parameters"]
+            self.assertNotIn("shout", params["properties"])
+            ## Sent anyway (the model can't see it, but could guess it): the host drops it
+            self.assertEqual(host.call("greet", '{"name": "Palmtree", "shout": true}').text, "hello Palmtree")
+
     def test_untrusted_content_is_labelled(self):
         with MCPHost({"fake": fake(tools={"echo": {}, "fail": {}}, untrusted_content=True)}) as host:
             ok = host.call("echo", '{"text": "do evil"}')
@@ -222,6 +241,55 @@ class Failures(unittest.TestCase):
         self.assertEqual(host.tool_schemas(), [])
         self.assertFalse(host.call("echo", '{"text": "x"}').ok)
         host.close()  ## Closing twice is harmless
+
+
+class RemoteServers(unittest.TestCase):
+    ## Servers reached by URL (MCP Streamable HTTP), like DeepWiki. A fake one runs on this PC.
+    @classmethod
+    def setUpClass(cls):
+        import socket, subprocess, time
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            cls.port = s.getsockname()[1]
+        cls.proc = subprocess.Popen([sys.executable, FAKE, "remote", "--http", str(cls.port)],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            try:
+                socket.create_connection(("127.0.0.1", cls.port), timeout=0.5).close()
+                break
+            except OSError:
+                time.sleep(0.2)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.proc.terminate()
+        cls.proc.wait(10)
+
+    def test_tools_are_discovered_and_called_over_http(self):
+        spec = {"url": f"http://127.0.0.1:{self.port}/mcp", "tools": {"echo": {}, "add": {}},
+                "headers": {"X-Test": "value"}}
+        with MCPHost({"remote": spec}) as host:
+            self.assertEqual(host.problems, [])
+            self.assertEqual(sorted(names(host)), ["add", "echo"])
+            result = host.call("echo", '{"text": "hi Palmtree"}')
+            self.assertTrue(result.ok)
+            self.assertEqual((result.text, result.server), ("remote echo: hi Palmtree", "remote"))
+
+    def test_plain_http_is_refused_for_other_hosts(self):
+        with MCPHost({"remote": {"url": "http://example.com/mcp", "tools": {"echo": {}}}}) as host:
+            self.assertEqual(names(host), [])
+            self.assertTrue(any("must be https://" in p for p in host.problems))
+
+    def test_command_and_url_together_is_a_config_error(self):
+        with MCPHost({"both": fake() | {"url": "https://example.com/mcp"}}) as host:
+            self.assertTrue(any("not both" in p for p in host.problems))
+
+    def test_unreachable_server_fails_cleanly(self):
+        with MCPHost({"gone": {"url": "http://127.0.0.1:9/mcp", "tools": {"echo": {}}}},
+                     startup_timeout=15) as host:
+            self.assertEqual(names(host), [])
+            self.assertTrue(any("gone" in p for p in host.problems))
 
 
 class PersonalServer(unittest.TestCase):

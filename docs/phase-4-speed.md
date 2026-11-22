@@ -154,10 +154,24 @@ Expected if it passes: on top of Step 2, cold reads ~5× faster, writing ~3× fa
 
 ### Step 5: Small server tweaks (only if staying on the 30B)
 Measure each one with `speed_bench.py` and the evals, and keep only the ones that help:
-- [ ] `-ctk q8_0 -ctv q8_0` (KV cache at 8-bit) frees VRAM for 1–3 more expert layers on the
-      GPU, giving a small generation gain. Quality impact at q8_0 is normally negligible, but run the evals anyway.
-- [ ] `-t 8` (physical cores) vs the default thread count, for the CPU-side experts.
-- [ ] Trim tool descriptions only if a cold read is still a noticeable cost after Step 2.
+- [ ] ~~`-ctk q8_0 -ctv q8_0`~~ Not possible: llama.cpp quantizes the V cache only with flash
+      attention, which is off (see Status). K-only q8_0 would free ~0.4 GB, about one expert layer: a few %.
+- [x] `-t 8`: already the default (the server log shows `n_threads = 8`, the physical cores).
+- [x] Trim tool descriptions. Done once per-message tool loading made each group load re-read the
+      conversation (see Step 6).
+
+### Step 6: Smaller tool groups and a background startup check (2026-11-21)
+- [x] GitHub tool schemas cut from 12,972 to 4,403 characters (~2,100 fewer tokens to re-read when
+      the group loads). Pagination, sorting and field selectors are hidden. List sizes (10) and
+      returned fields are fixed by the host, which also shrinks results (`full_name` dropped too).
+      The host now strips vendor `x-...` keys from every schema. All tools together: 20,400 → 11,900 characters.
+- [x] The startup check runs in the background while you type. The first message waits for it,
+      so the cache warming still applies.
+- Result (`speed_bench.py --personal`): GitHub turn 63.4 s → 41.0 s; 7-turn total 102.5 s → 81.1 s.
+  Repo answers checked against the real repo list: no made-up names.
+- Considered and rejected: `--cache-reuse`. It would let a group load skip re-reading by shifting the
+  cached conversation, but those cached tokens were computed without the new tools in front of them.
+  That's an approximation, and the rule here is no quality loss.
 
 ## Not doing (and why)
 - **Speculative decoding / MTP:** reported to give no gain, or to slow things down, for MoE
