@@ -11,7 +11,8 @@ from collections import Counter
 ## label -> (pattern, target share of replies or None for "just report it")
 HABITS = {
     "em dash":          (r"—", None),   ## Fine with the user: just reported
-    "emoji":            (r"[\U0001F300-\U0001FAFF☀-➿]", 0.0),
+    ## Pictographs plus the common text-style ones; not ✓ ★ (fine in a checklist)
+    "emoji":            (r"[\U0001F300-\U0001FAFF\u2764\u263A\u2728\u2B50]", 0.0),
     "pet name":         (r"\b(babe|hon|honey|darling|sweetie|love|pal)\b(?=[,.!?]|$)", 0.20),
     "'Got it' opener":  (r"^\W*got it\b", 0.05),
     "service closer":   (r"let me know|how can i (help|assist)|anything else|feel free|i'?m here to help|happy to help", 0.02),

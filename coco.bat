@@ -60,6 +60,8 @@ if not defined LLAMA_SERVER (echo Could not find llama-server.exe. Put the llama
 rem The port is free, or llama-server dies with "couldn't bind HTTP server socket" and Coco talks to the wrong server
 set "PORT_OWNER="
 for /f "delims=" %%O in ('powershell -NoProfile -Command "$c = Get-NetTCPConnection -LocalPort %PORT% -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; if ($c) { (Get-Process -Id $c.OwningProcess).ProcessName }"') do set "PORT_OWNER=%%O"
+rem A llama-server that's still loading holds the port but doesn't answer /health yet: wait for it
+if /i "%PORT_OWNER%"=="llama-server" (echo llama-server is already starting on port %PORT%. Waiting for it... & goto :wait_existing)
 if defined PORT_OWNER (echo Port %PORT% is already used by another program: %PORT_OWNER%. Close it, or change PORT here and BASE_URL in src\loop\agent.py. & goto :fail)
 
 if not exist logs mkdir logs
@@ -78,6 +80,16 @@ ping -n 3 127.0.0.1 >nul
 set /a WAITED+=2
 if %WAITED% geq %MAX_WAIT_SECONDS% (echo llama-server was not ready after %MAX_WAIT_SECONDS% seconds. & goto :fail)
 goto :wait
+
+rem Someone else's llama-server (not started here, so never stopped here): wait until it's ready
+:wait_existing
+set /a WAITED=0
+:wait_existing_loop
+curl -s -f -o nul "http://127.0.0.1:%PORT%/health" && goto :run
+ping -n 3 127.0.0.1 >nul
+set /a WAITED+=2
+if %WAITED% geq %MAX_WAIT_SECONDS% (echo llama-server was not ready after %MAX_WAIT_SECONDS% seconds. & goto :fail)
+goto :wait_existing_loop
 
 rem ---- 4. Coco ----
 :run

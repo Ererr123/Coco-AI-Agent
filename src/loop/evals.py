@@ -161,7 +161,7 @@ CASES = [
          notes={"other.txt": "nothing here"},
          ## Apostrophes may be curly (doesn’t). Pattern list widened after a correct in-character reply ("Oops, no budget.txt here") failed it; also "no `budget.txt`"
          checks=[output_matches(r"not exist|doesn['’]?t exist|no such|not found|couldn['’]?t find|could not find|no file|isn['’]?t"
-                                r"|\bno `?budget|missing|don['’]?t see|can['’]?t find|not there|nowhere|only `?other"
+                                r"|\bno `?budget|missing|don['’]?t see|don['’]?t have|can['’]?t find|not there|nowhere|only `?other"
                                 r"|not in (your|the)",  ## "that file's not in your notes folder" is correct
                                 "says the file isn't there"),
                  finished_within(3)]),  ## Was looping on the same failing read_file at temperature 0
@@ -411,7 +411,7 @@ def main():
 
     if args.temperature is not None:
         agent.TEMPERATURE = args.temperature
-    if args.dry:
+    if args.dry is not None:
         agent.SAMPLING["dry_multiplier"] = args.dry
     ## Evals use only the checked-in servers: never your personal Gmail/GitHub from mcp_servers.local.json.
     ## --servers/--web switch on just those servers, through a temporary local config.

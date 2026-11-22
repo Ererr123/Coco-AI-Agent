@@ -355,7 +355,10 @@ class FileChangeHonesty(unittest.TestCase):
     def test_claim_rules(self):
         lst = ["eggs, oat milk, flour, coffee beans"]   ## What read_file returned
         u = agent.ungrounded_change
-        self.assertEqual(u("Butter's on the list.", wrote=False, read_texts=lst), "write")
+        self.assertEqual(u("Butter's on the list.", wrote=False, read_texts=lst), "wrong")   ## The list says otherwise
+        self.assertIsNone(u("Eggs are on your shopping list.", wrote=False, read_texts=lst))  ## True: just reading it
+        self.assertEqual(u("Butter's on the list now.", wrote=False, read_texts=lst), "write")
+        self.assertIsNone(u("I can't find that list there.", wrote=False, read_texts=[]))
         self.assertEqual(u("Added it.", wrote=False, read_texts=[]), "write")
         self.assertEqual(u("Butter's in. Shopping list now: eggs, butter.", wrote=False, read_texts=lst), "write")
         self.assertIsNone(u("Added it.", wrote=True, read_texts=lst))
@@ -421,7 +424,7 @@ class FileChangeHonesty(unittest.TestCase):
             record = agent.run_agent_traced("we're out of butter", history, on_text=shown.append)
             self.assertEqual(record["claim_retries"], 1)
             self.assertIsNone(sent[1][1])                         ## Held back: no write yet
-            self.assertIn("no write succeeded", sent[2][0][-1]["content"])
+            self.assertIn("haven't successfully read it", sent[2][0][-1]["content"])  ## Nothing was read
             self.assertEqual(shown, ["Want me to add butter to shopping.txt?"])
             self.assertFalse(any("on the list" in str(m.get("content")) for m in history))
         finally:
@@ -477,7 +480,7 @@ class ChangeTurnPromisesAndNewLists(unittest.TestCase):
             agent.call_model = fake_call_model
             record = agent.run_agent_traced("take flour off the shopping list", [{"role": "system", "content": "sys"}])
             self.assertEqual(record["claim_retries"], 1)
-            self.assertIn("promised to do something later", sent[2][-1]["content"])
+            self.assertIn("The user asked for this change, so do it now", sent[2][-1]["content"])  ## Not "offer it back"
             self.assertEqual(record["output"], "Want me to take flour off shopping.txt?")
         finally:
             agent.host, agent.call_model, agent.server_model = saved
@@ -504,6 +507,119 @@ class ChangeTurnPromisesAndNewLists(unittest.TestCase):
                 self.assertEqual(agent.unasked_new_file(grocery, said("we ran out of eggs")), "grocery_list.txt")
             finally:
                 agent.NOTES_DIR = saved_dir
+
+
+class ReviewFixes(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.saved = (agent.host, agent.call_model, agent.server_model, agent.NOTES_DIR)
+        agent.host, agent.server_model, agent.NOTES_DIR = FakeHost(), (lambda: "fake"), Path(self.tmp.name)
+        (agent.NOTES_DIR / "shopping.txt").write_text("eggs", encoding="utf-8")
+
+    def tearDown(self):
+        agent.host, agent.call_model, agent.server_model, agent.NOTES_DIR = self.saved
+        self.tmp.cleanup()
+
+    def script(self, replies, shown_log=None):
+        def fake_call_model(messages, tools, on_text=None, tool_choice="auto"):
+            reply = replies.pop(0)
+            if isinstance(reply, Exception):
+                raise reply
+            if on_text and reply.content:
+                on_text(reply.content)
+            return reply
+        agent.call_model = fake_call_model
+
+    def call(self, name, args):
+        return agent.ModelReply(content=None, tool_calls=[{"id": name, "name": name, "arguments": args}])
+
+    def test_paths_keep_their_folder(self):
+        self.assertEqual(agent.note_path('{"path": "./ideas/../ideas/todo.txt"}'), "ideas/todo.txt")
+        self.assertIsNone(agent.note_path('["not", "a", "dict"]'))
+        self.assertIsNone(agent.note_path('{"path": 5}'))
+        ## Reading shopping.txt doesn't make old/shopping.txt safe to overwrite
+        (agent.NOTES_DIR / "old").mkdir()
+        (agent.NOTES_DIR / "old" / "shopping.txt").write_text("milk", encoding="utf-8")
+        args = json.dumps({"path": "old/shopping.txt", "content": "milk, butter"})
+        self.assertIn("haven't read it", agent.unsafe_overwrite(args, [{"role": "user", "content": "add butter"}], {"shopping.txt"}))
+
+    def test_invalid_json_notes_dont_block_an_asked_write(self):
+        self.script([agent.InvalidToolCall("bad"), agent.InvalidToolCall("bad"),
+                     self.call("read_file", '{"path": "shopping.txt"}'),
+                     self.call("write_file", '{"path": "shopping.txt", "content": "eggs, butter"}'),
+                     agent.ModelReply(content="Butter's on the list.", tool_calls=[])])
+        record = agent.run_agent_traced("add butter to my shopping list", [{"role": "system", "content": "sys"}])
+        self.assertEqual(record["unasked_writes"], 0)
+        self.assertEqual([c[0] for c in agent.host.calls], ["read_file", "write_file"])
+
+    def test_nothing_shown_is_dropped_after_a_write(self):
+        self.script([self.call("read_file", '{"path": "shopping.txt"}'),
+                     self.call("write_file", '{"path": "shopping.txt", "content": "eggs, butter"}'),
+                     agent.ModelReply(content="Added. Milk isn't on the list, by the way.", tool_calls=[])])
+        shown = []
+        record = agent.run_agent_traced("add butter to my shopping list", [{"role": "system", "content": "sys"}],
+                                        on_text=shown.append)
+        self.assertEqual(record["claim_retries"], 0)
+        self.assertEqual("".join(shown), "Added. Milk isn't on the list, by the way.")
+
+
+class SecondReviewFixes(unittest.TestCase):
+    ## Found by an independent review: guards misfiring on true replies or switching off
+    def setUp(self):
+        self.saved = (agent.host, agent.call_model, agent.server_model)
+        agent.host, agent.server_model = FakeHost(), (lambda: "fake")
+
+    def tearDown(self):
+        agent.host, agent.call_model, agent.server_model = self.saved
+
+    def script(self, *replies):
+        replies = list(replies)
+        agent.call_model = lambda messages, tools, on_text=None, tool_choice="auto": replies.pop(0)
+
+    def call(self, name, args):
+        return agent.ModelReply(content=None, tool_calls=[{"id": name, "name": name, "arguments": args}])
+
+    def say(self, text):
+        return agent.ModelReply(content=text, tool_calls=[])
+
+    def test_memory_turn_with_a_change_word_is_not_a_file_change(self):
+        self.script(self.call("remember", '{"fact": "Spare key is under the mat"}'), self.say("Spare key's under the mat, saved."))
+        record = agent.run_agent_traced("remember that I put my spare key under the mat", [{"role": "system", "content": "sys"}])
+        self.assertEqual(record["output"], "Spare key's under the mat, saved.")
+        self.assertEqual(record["claim_retries"], 0)
+
+    def test_question_after_a_change_isnt_a_change(self):
+        h = [{"role": "user", "content": "add eggs to my list"}, {"role": "assistant", "content": "Added."},
+             {"role": "user", "content": "what's on it now?"}]
+        self.assertFalse(agent.file_change_wanted(h))
+
+    def test_chat_is_not_a_claim_or_promise(self):
+        self.assertFalse(agent.claims_action("Here's one I wrote: rain on the glass."))
+        self.assertFalse(agent.promises_later("Later! I'll look forward to it."))
+        self.assertTrue(agent.promises_later("I'll look into it."))
+        self.assertTrue(agent.promises_later("Let's check what's in the pantry first."))
+        self.assertFalse(agent.promises_later("Let me know if that changes."))
+        self.assertEqual(agent.ungrounded_change("Flour's off the shopping list.", wrote=False, read_texts=["flour"]), "write")
+
+    def test_repeating_a_refused_write_doesnt_switch_the_guard_off(self):
+        write = self.call("write_file", '{"path": "shopping.txt", "content": "coffee"}')
+        self.script(write, write, self.say("Done, I've added coffee to your shopping list."),
+                    self.say("Done, I've added coffee."), self.say("Done. Added coffee."))
+        record = agent.run_agent_traced("my cat spilled my coffee", [{"role": "system", "content": "sys"}])
+        self.assertEqual(agent.host.calls, [])
+        self.assertNotIn("added coffee", record["output"])
+        self.assertTrue(record["claim_blocked"])
+
+    def test_unsaved_remember_claim_is_replaced_even_after_another_tool(self):
+        self.script(self.call("list_notes", "{}"), self.say("Saved."), self.say("Saved!"), self.say("All saved."))
+        record = agent.run_agent_traced("remember that I like tea", [{"role": "system", "content": "sys"}])
+        self.assertIn("didn't save", record["output"])
+
+    def test_checkmarks_are_not_emoji(self):
+        import voice
+        self.assertFalse(voice.has("emoji", "✓ eggs ★ milk"))
+        self.assertTrue(voice.has("emoji", "nice 😎"))
 
 
 if __name__ == "__main__":

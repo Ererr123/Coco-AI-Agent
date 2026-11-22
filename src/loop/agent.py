@@ -14,6 +14,7 @@ memory and web search always; Gmail, GitHub and coding help loaded per conversat
 
 import hashlib
 import json
+import os
 import re
 import sys
 import threading
@@ -321,7 +322,7 @@ def asks_to_remember(user_input: str) -> bool:
 ACTION_CLAIM = re.compile(
     r"^\W*(?:done|saved|added|removed|deleted|created|updated|noted|remembered)\b"
     r"|\bI(?:['’]ve| have)?\s+(?:just\s+|already\s+)?(?:restored|opened|checked|added|saved|removed|"
-    r"deleted|created|reorganized|organized|turned|pulled|updated|listed|sorted|moved|renamed|written|wrote|"
+    r"deleted|created|reorganized|organized|turned|pulled|updated|listed|sorted|moved|renamed|written|"
     r"fixed|backed up|set up|scheduled|sent|booked)\b", re.IGNORECASE)
 
 def claims_action(text: str | None) -> bool:
@@ -331,10 +332,10 @@ def claims_action(text: str | None) -> bool:
 ## "I'll add it to your fitness log", "I'll remember to keep the coffee away", "I'll keep an eye out":
 ## a promise to do something later. She can't act later on her own, so with no tool call it's made up.
 PROMISE = re.compile(
-    r"\bI(?:['’]ll| will)\s+(?:just\s+|also\s+|go ahead and\s+)?(?:add|save|log|note|jot|put|write|"
+    r"\b(?:I(?:['’]ll| will)|let me|let['’]s)\s+(?:just\s+|also\s+|go ahead and\s+)?(?:add|save|log|note|jot|put|write|"
     r"update|cross|track|remind|schedule|store|remember|keep (?:that|it|this) in mind|keep an eye|"
     ## Not "make/take/start": "I'll take that as a compliment" is just talk
-    r"make a note|check|look|remove|delete|edit)\b",
+    r"make a note|check|look (?:into|at|for|through|it up)|take a look|remove|delete|edit)\b",
     re.IGNORECASE)  ## "I'll check the list. One second." / "I'll remove flour from it." with nothing done
 
 def promises_later(text: str | None) -> bool:
@@ -369,7 +370,12 @@ def file_change_wanted(history: list[dict]) -> bool:
     users = [i for i, m in enumerate(history) if m["role"] == "user"]
     if not users:
         return False
-    if any(asks_to_change(str(history[i].get("content") or "")) for i in users[-2:]):
+    last = str(history[users[-1]].get("content") or "")
+    if asks_to_change(last):
+        return True
+    ## The previous message counts for a clarifying answer ("the shopping one"), not for a new
+    ## question: after "add eggs to my list", "what's on it now?" changes nothing
+    if len(users) > 1 and not last.rstrip().endswith("?") and asks_to_change(str(history[users[-2]].get("content") or "")):
         return True
     offer = next((m for m in reversed(history[:users[-1]]) if m["role"] == "assistant" and m.get("content")), None)
     return bool(AGREE.search(str(history[users[-1]]["content"])) and offer and asks_to_change(offer["content"]))
@@ -381,14 +387,22 @@ def file_change_wanted(history: list[dict]) -> bool:
 ## asked for a new one (here or in the offer they said yes to).
 NEW_FILE_REQUEST = re.compile(r"\b(new|create|make|start)\b", re.IGNORECASE)
 
+def note_path(raw_args: str | None) -> str | None:
+    ## The "path" argument of a notes tool call, normalized ("./ideas/x.md" -> "ideas/x.md"), or None.
+    ## The full relative path, not just the file name: ideas/todo.txt and todo.txt are different files.
+    try:
+        args = json.loads(raw_args or "{}")
+    except json.JSONDecodeError:
+        return None
+    path = args.get("path") if isinstance(args, dict) else None
+    return Path(os.path.normpath(path)).as_posix() if isinstance(path, str) and path.strip() else None
+
 def unasked_new_file(raw_args: str | None, history: list[dict]) -> str | None:
     ## The file name, if this write would create a file nobody asked for
-    try:
-        name = Path(str(json.loads(raw_args or "{}").get("path") or "")).name
-    except (json.JSONDecodeError, AttributeError):
+    rel = note_path(raw_args)
+    if not rel or (NOTES_DIR / rel).exists():
         return None
-    if not name or (NOTES_DIR / name).exists():
-        return None
+    name = Path(rel).name
     users = [i for i, m in enumerate(history) if m["role"] == "user"]
     asked = [str(history[i].get("content") or "") for i in users[-2:]]
     if users:
@@ -401,8 +415,8 @@ def unasked_new_file(raw_args: str | None, history: list[dict]) -> str | None:
     ## shopping_list.txt when shopping.txt exists, and not grocery_list.txt for "we're out of eggs".
     topic = set(re.findall(r"[a-z]+", Path(name).stem.lower())) - {"list", "lists", "my", "file", "notes", "note"}
     said = set(re.findall(r"[a-z]+", text.lower()))
-    taken = {w for f in NOTES_DIR.glob("*") for w in re.findall(r"[a-z]+", f.stem.lower())}
-    return None if topic and topic <= said and not (topic & taken) else name
+    taken = {w for f in NOTES_DIR.rglob("*") for w in re.findall(r"[a-z]+", f.stem.lower())}
+    return None if topic and topic <= said and not (topic & taken) else rel
 
 
 ## write_file replaces the WHOLE file. Live runs: "we're out of butter" overwrote shopping.txt with just
@@ -418,15 +432,12 @@ REWORK_REQUEST = re.compile(r"\b(sort|order|format|organi[sz]e|turn|checklist|ti
 
 def unsafe_overwrite(raw_args: str | None, history: list[dict], read_paths: set) -> str | None:
     ## Why this write would lose the user's text, or None if it's safe
-    try:
-        args = json.loads(raw_args or "{}")
-        name, content = Path(str(args.get("path") or "")).name, str(args.get("content") or "")
-    except (json.JSONDecodeError, AttributeError):
+    rel = note_path(raw_args)
+    if not rel or not (NOTES_DIR / rel).is_file():
         return None
-    path = NOTES_DIR / name
-    if not name or not path.is_file():
-        return None
-    if name not in read_paths:
+    path, name = NOTES_DIR / rel, rel
+    content = str(json.loads(raw_args).get("content") or "")
+    if rel not in read_paths:
         return (f"{name} already exists and you haven't read it this turn. write_file replaces the whole "
                 "file, so read it first, then write back everything in it plus the change.")
     users = [str(m.get("content") or "") for m in history if m["role"] == "user"][-2:]
@@ -449,22 +460,24 @@ def unsafe_overwrite(raw_args: str | None, history: list[dict], read_paths: set)
     return None
 
 
-## "Butter's on the list", "Added it", "Updated your shopping list": a claim that a file changed.
-## On a turn where the user asked for a change, it's only true if a write succeeded. Questions are
-## offers, not claims.
+## On a turn where the user asked for a file change, two kinds of claims are checked:
+## - a CHANGE ("Added it", "Done", "Updated your list", "on the list now"): only true if a write succeeded
+## - CONTENT ("Eggs are already on your list", "Butter's on the list", "Milk isn't on it"): only true
+##   if a file was read, and checked against what it said. Live runs: "already on the list" after reading
+##   a list without it, "aren't on it" without reading anything, "Butter's on the list" with no write.
+## Questions are offers, not claims.
 CHANGE_CLAIM = re.compile(
-    r"\b(?:added|put|saved|updated|wrote|written|created|crossed (?:it )?off|removed|deleted|replaced|logged|"
-    r"in the cart|now (?:on|in|reads)|(?:list|file) now|(?:on|in|to|from) (?:the|your) (?:\w+ )?(?:list|file|notes?))\b"
-    r"|['’]s in\b|\bare in\b|^\W*done\b", re.IGNORECASE)
-## "Eggs are already on your list", "Butter isn't on it": a claim about what's IN the file. Only true
-## if a file was read, and checked against what it says (live runs: "already on the list" after
-## reading a list without it, "aren't on it" without reading anything).
-STATE_CLAIM = re.compile(r"\b(?:already|not|no longer)\b|n['’]t\b", re.IGNORECASE)
-PLACE = re.compile(r"\b(?:on|in) (?:it|there|(?:the|your) (?:\w+ )?(?:list|file|notes?))\b|\bthere\b", re.IGNORECASE)
-NEGATIVE = re.compile(r"\b(?:not|no longer)\b|n['’]t\b", re.IGNORECASE)
-NOT_AN_ITEM = set("is are was were be been the a an your my our it its on in there already not no longer list lists "
+    r"\b(?:added|put|saved|updated|written|created|crossed (?:it )?off|removed|deleted|replaced|logged|"
+    r"in the cart|now (?:on|in|reads)|(?:list|file) now|"
+    r"off (?:it|there|(?:the|your) (?:\w+ )?(?:list|file|notes?)))\b"  ## "Flour's off the list" with no write
+    r"|^\W*done\b", re.IGNORECASE)
+PLACE = re.compile(r"\b(?:on|in) (?:it|there|(?:the|your) (?:\w+ )?(?:list|file|notes?))\b", re.IGNORECASE)
+NOW = re.compile(r"\bnow\b", re.IGNORECASE)
+## Only negations about being on the list: "can't find it" or "don't worry" aren't claims about the file
+NEGATIVE = re.compile(r"\b(?:not|no longer|never)\b|\b(?:is|are|was|were)n['’]t\b", re.IGNORECASE)
+NOT_AN_ITEM = set("is are was were be been the a an your my our it its on in there already not no longer never list lists "
                   "shopping grocery groceries file notes note all set you re good to go they them and of s t aren isn "
-                  "wasn weren don doesn yet still also so just that this those these them here now".split())
+                  "wasn weren don doesn yet still also so just that this those these here now".split())
 
 def _items(sentence: str) -> list[str]:
     return [w.lower() for w in WORD.findall(sentence) if w.lower() not in NOT_AN_ITEM and len(w) > 2]
@@ -479,16 +492,16 @@ def ungrounded_change(text: str | None, wrote: bool, read_texts: list[str]) -> s
     for sentence in re.split(r"(?<=[.!?])\s+", (text or "").strip()):
         if sentence.rstrip().endswith("?"):
             continue
-        if STATE_CLAIM.search(sentence) and PLACE.search(sentence):
+        place = PLACE.search(sentence)
+        if CHANGE_CLAIM.search(sentence) or (place and NOW.search(sentence)):
+            if not wrote:
+                return "write"
+        elif place:
             if not read_texts:
                 return "read"
             items = _items(sentence)
-            if items:
-                present = any(_in_text(i, file_words) for i in items)
-                if present == bool(NEGATIVE.search(sentence)):
-                    return "wrong"
-        elif CHANGE_CLAIM.search(sentence) and not wrote:
-            return "write"
+            if items and any(_in_text(i, file_words) for i in items) == bool(NEGATIVE.search(sentence)):
+                return "wrong"
     return None
 
 
@@ -632,7 +645,10 @@ def run_agent_traced(user_input: str, history: list[dict], on_text=None) -> dict
     tool_ran = False
     ## Third guard: when the user asked for a file change, "Butter's on the list" is only true once a
     ## write succeeded ("already on it" once a read did). Until then replies are held back too.
-    change_wanted = file_change_wanted(history)
+    change_wanted = file_change_wanted(history) and not guard
+    ## What the user asked, as of the start of the turn. Mid-turn the history also holds tool results
+    ## and app notes (an invalid-JSON note is a "user" message), which would push the request out.
+    asked = list(history)
     wrote = False
     read_texts = []     ## What the files read this turn said (to check "already on the list")
     read_paths = set()  ## Files read (or written) successfully this turn: only these may be overwritten
@@ -650,6 +666,7 @@ def run_agent_traced(user_input: str, history: list[dict], on_text=None) -> dict
         except InvalidToolCall:
             ## The server could not parse the model's tool call, so tell the model and let it retry.
             record["invalid_tool_json"] += 1
+            retry_note = nudge[0]["content"] if nudge else None  ## Still owed: send it with the retry
             history.append({"role": "user", "content": "Your last tool call was invalid JSON. Retry using only literal strings (no + or expressions)."})
             continue
 
@@ -690,12 +707,20 @@ def run_agent_traced(user_input: str, history: list[dict], on_text=None) -> dict
             if promise_matters and promises_later(reply.content) and record["claim_retries"] < 2:
                 ## "I'll add it to your log": she can't do anything later on her own. Do it or offer it.
                 record["claim_retries"] += 1
-                retry_note = ("(Note from the app, not the user: your last reply promised to do something "
+                ## On a change turn the user already asked: offering it back as a question just stalls
+                ## (live runs: "take flour off the list" -> "Should I remove flour from shopping.txt?")
+                retry_note = ("(Note from the app, not the user: your last reply said you'll do it, but nothing "
+                              "has been done. The user asked for this change, so do it now with the tools: read "
+                              "the file, then write it back with the change and everything else kept.)"
+                              if change_wanted else
+                              "(Note from the app, not the user: your last reply promised to do something "
                               "later (\"I'll add...\", \"I'll remember...\"), but you can't act later on your "
                               "own and no tool ran. Answer again: if the user asked for it, call the tool now; "
                               "otherwise just reply, offering it as a question if it would help.)")
                 continue
-            ungrounded = ungrounded_change(reply.content, wrote, read_texts) if change_wanted and tool_ran else None
+            ## Only while held back (no write yet): after a write, replies stream and can't be taken back
+            ungrounded = (ungrounded_change(reply.content, wrote, read_texts)
+                          if change_wanted and tool_ran and not wrote else None)
             if ungrounded and record["claim_retries"] < 2:
                 ## A tool ran, but not the one that would make the reply true
                 record["claim_retries"] += 1
@@ -718,7 +743,7 @@ def run_agent_traced(user_input: str, history: list[dict], on_text=None) -> dict
                                  "I couldn't read the file, so I can't tell you what's in it. Which one is it?"
                                  if ungrounded == "read" else
                                  "I got that wrong. Ask me again and I'll go through the file properly.")
-            elif not tool_ran and (remember_pending or claims_action(reply.content)):
+            elif remember_pending or (not tool_ran and claims_action(reply.content)):
                 ## Still claiming after the retries: never show a made-up "done" to the user
                 record["claim_blocked"] = True
                 reply.content = ("That didn't save. My mistake. Say it again and I'll store it." if remember_pending
@@ -760,13 +785,14 @@ def run_agent_traced(user_input: str, history: list[dict], on_text=None) -> dict
             refused = False     ## Refused here, never run: doesn't count as a tool having run
             if repeated:
                 record["repeated_calls"] += 1
+                refused = True  ## Blocked, not run: must not count as a tool having run
                 tool_result = ("Error: You already made this exact call and got the result above. "
                                "Do not call it again. Answer the user now.")
             else:
                 seen_calls.add(call_key)
                 if tool_name == LOAD_TOOLS:  ## Handled here: it only changes tools_for() from the next step
                     (tool_result, ok), server, log_payloads = run_load_tools(tool_args), "agent", True
-                elif tool_name in FILE_CHANGING_TOOLS and not file_change_wanted(history):
+                elif tool_name in FILE_CHANGING_TOOLS and not change_wanted:
                     ## Nobody asked for a file change: don't touch the user's files, tell the model why
                     record["unasked_writes"] += 1
                     refused = True
@@ -774,14 +800,14 @@ def run_agent_traced(user_input: str, history: list[dict], on_text=None) -> dict
                         f"Not run: the user didn't ask you to create or change any files, so {tool_name} "
                         "was not called. Don't change files unless asked. Answer in the chat instead, and "
                         "offer to save it only if that would really help."), "agent", False
-                elif tool_name in FILE_CHANGING_TOOLS and (new_name := unasked_new_file(tool_args, history)):
+                elif tool_name in FILE_CHANGING_TOOLS and (new_name := unasked_new_file(tool_args, asked)):
                     ## A new file with a guessed name: the user meant an existing one, or should be asked
                     record["unasked_writes"] += 1
                     refused = True
                     tool_result, server, ok = (
                         f"Not run: {new_name} doesn't exist and the user didn't ask for a new file."
                         + missing_file_hint()), "agent", False
-                elif tool_name in FILE_CHANGING_TOOLS and (danger := unsafe_overwrite(tool_args, history, read_paths)):
+                elif tool_name in FILE_CHANGING_TOOLS and (danger := unsafe_overwrite(tool_args, asked, read_paths)):
                     ## Would wipe the user's existing text: refuse, say how to do it safely
                     record["unsafe_writes"] += 1
                     refused = True
@@ -800,10 +826,8 @@ def run_agent_traced(user_input: str, history: list[dict], on_text=None) -> dict
                 read_texts.append(tool_result)
             if tool_name in ("read_file", *FILE_CHANGING_TOOLS) and ok:
                 ## Read it, or wrote it (so its content is what she just wrote): safe to write again
-                try:
-                    read_paths.add(Path(str(json.loads(tool_args or "{}").get("path") or "")).name)
-                except (json.JSONDecodeError, AttributeError):
-                    pass
+                if rel := note_path(tool_args):
+                    read_paths.add(rel)
             record["tool_calls"].append({
                 "step": step + 1,
                 "name": tool_name,

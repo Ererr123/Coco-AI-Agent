@@ -53,6 +53,19 @@ PROMPTS = [
 ]
 
 
+def reset_sandbox() -> None:
+    ## Back to the sample notes and memories. Without this, "remember I'm vegetarian" or "add ... to my
+    ## todo list" leaked into every later prompt of the run (a later answer mentioned an earlier save).
+    ## The servers read the files on every call, so they can keep running.
+    for f in sorted(agent.NOTES_DIR.rglob("*"), reverse=True):
+        f.rmdir() if f.is_dir() else f.unlink()
+    for name, content in NOTES.items():
+        (agent.NOTES_DIR / name).write_text(content, encoding="utf-8")
+    agent.MEMORY_FILE.write_text("", encoding="utf-8")
+    for fact, category in MEMORIES:
+        memory_store.remember(agent.MEMORY_FILE, fact, category)
+
+
 def run(label: str, persona: Path | None, samples: int, prompts: list[str]) -> None:
     agent.MCP_LOCAL_CONFIG = None  ## Checked-in servers only: never personal accounts
     if persona:
@@ -62,23 +75,19 @@ def run(label: str, persona: Path | None, samples: int, prompts: list[str]) -> N
         root = Path(tmp)
         agent.NOTES_DIR, agent.MEMORY_FILE, agent.LOG_DIR = root / "notes", root / "memory.md", root / "logs"
         agent.NOTES_DIR.mkdir()
-        for sample in range(samples):
-            for name, content in NOTES.items():
-                (agent.NOTES_DIR / name).write_text(content, encoding="utf-8")
-            agent.MEMORY_FILE.unlink(missing_ok=True)
-            agent.load_memory()
-            for fact, category in MEMORIES:
-                memory_store.remember(agent.MEMORY_FILE, fact, category)
-            problems = agent.start_tools()
-            if problems:
-                sys.exit("MCP problems: " + "; ".join(problems))
-            try:
+        agent.MEMORY_FILE.touch()
+        problems = agent.start_tools()
+        if problems:
+            sys.exit("MCP problems: " + "; ".join(problems))
+        try:
+            for sample in range(samples):
                 for i, prompt in enumerate(prompts, 1):
-                    trace = agent.run_agent_traced(prompt, [])  ## Each prompt starts a new conversation
+                    reset_sandbox()  ## Every prompt starts from the same notes and memory
+                    trace = agent.run_agent_traced(prompt, [])  ## ...and a new conversation
                     answers[prompt].append(trace["output"] or "")
                     print(f"  [{sample + 1}/{samples}] {i:2}/{len(prompts)} {prompt[:40]}", flush=True)
-            finally:
-                agent.stop_tools()
+        finally:
+            agent.stop_tools()
     RESULTS_DIR.mkdir(exist_ok=True)
     out = {"label": label, "timestamp": datetime.now().isoformat(timespec="seconds"),
            "persona": str(agent.PERSONA_FILE), "temperature": agent.TEMPERATURE,
@@ -94,7 +103,8 @@ def compare(a: str, b: str) -> None:
              f"Same prompts (from the second run), temperature {left['temperature']}. Each prompt starts a fresh conversation.", "",
              f"| Habit | {a} | {b} | Target |", "|---|---|---|---|"]
     for habit, (_, target) in voice.HABITS.items():
-        lines.append(f"| {habit} | {left['voice']['habits'][habit]:.0%} | {right['voice']['habits'][habit]:.0%} | "
+        lines.append(f"| {habit} | {left['voice']['habits'].get(habit, 0):.0%} | "
+                     f"{right['voice']['habits'].get(habit, 0):.0%} | "
                      f"{'≤ ' + format(target, '.0%') if target is not None else ''} |")
     lines.append(f"| average words | {left['voice']['avg_words']} | {right['voice']['avg_words']} | 12–20 |")
     lines.append("")
@@ -123,7 +133,7 @@ def main():
     c.add_argument("b")
     args = parser.parse_args()
     if args.command == "run":
-        if args.dry:
+        if args.dry is not None:
             agent.SAMPLING = agent.SAMPLING | {"dry_multiplier": args.dry}
         if args.temperature is not None:
             agent.TEMPERATURE = args.temperature
