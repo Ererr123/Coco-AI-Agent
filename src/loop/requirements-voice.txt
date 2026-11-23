@@ -1,0 +1,7 @@
+# Coco's voice (phase 6): only needed for agent.py --speak / --voice. Models: tools/download_speech_models.py
+sounddevice>=0.5     # mic and speakers
+sherpa-onnx>=2.0     # wake word, voice activity detection, speech to text (Parakeet)
+soxr>=0.5            # resampling, for mics that can't record at 16 kHz
+kokoro-onnx>=0.4     # stand-in voice until Coco's own Piper voice is trained
+piper-tts>=1.8       # Coco's own voice (models/piper/*.onnx)
+numpy

@@ -286,10 +286,12 @@ def write_log(record: dict) -> None:
     except Exception as e:
         print(f"[warning: could not write log: {e}]")
 
-def run_agent(user_input: str, history: list[dict], on_text=None) -> str:
+def run_agent(user_input: str, history: list[dict], on_text=None, input_mode: str = "text") -> str:
     ## Run one user turn and return the agent's reply. The full trace is logged.
     ## on_text(piece) receives the reply as it's written (streaming); None waits for the whole reply.
+    ## input_mode: "text" (typed) or "voice" (a transcript), kept in the log to compare the two.
     record = run_agent_traced(user_input, history, on_text)
+    record["input_mode"] = input_mode
     write_log(record)
     return record["output"]
 
@@ -851,15 +853,34 @@ def run_agent_traced(user_input: str, history: list[dict], on_text=None) -> dict
 
 
 ## Main function to run the local agent in a loop, taking user input and generating responses from the local LLM model.
+def parse_args(argv=None):
+    import argparse
+    ap = argparse.ArgumentParser(description=f"Chat with {AGENT_NAME}.")
+    ap.add_argument("--speak", action="store_true", help="Read replies out loud (you type)")
+    ap.add_argument("--voice", action="store_true", help="Speak and listen: say 'hey Coco', or press Enter to talk")
+    ap.add_argument("--tts", default=None, help="Voice: piper, kokoro or kokoro:<voice> (default: Coco's Piper voice if installed, else Kokoro)")
+    ap.add_argument("--mic", default=None, help="Microphone, by part of its name (default: the Windows default)")
+    ap.add_argument("--speaker", default=None, help="Output device, by part of its name (default: the Windows default)")
+    return ap.parse_args(argv)
+
 def main():
+    args = parse_args()
+    voice = None
+    if args.speak or args.voice:
+        print("Loading voice models...")
+        from speech.session import VoiceSession  ## Only imported when used: typing needs no audio packages
+        voice = VoiceSession(listen=args.voice, tts=args.tts, mic=args.mic, speaker=args.speaker,
+                             agent_name=AGENT_NAME)
     print(f"Starting MCP servers from {MCP_CONFIG.name}...")
     problems = start_tools()  ## Also creates the notes folder and memory.md if missing
     try:
-        chat(problems)
+        chat(problems, voice)
     finally:
         stop_tools()
+        if voice:
+            voice.close()
 
-def chat(problems: list[str]):
+def chat(problems: list[str], voice=None):
     history = []
     print(f"{AGENT_NAME} is ready (server: {BASE_URL}). Notes folder: {NOTES_DIR}")
     print(f"Persona:     {PERSONA_FILE.resolve() if PERSONA_FILE.exists() else '(none: plain assistant)'}")
@@ -872,6 +893,8 @@ def chat(problems: list[str]):
     for name, spec in tool_groups.items():
         loaded_on = "load_tools" + (" or keywords" if spec["pattern"] else "")
         print(f"Tool group:  {name} ({', '.join(spec['servers'])}): loaded when needed ({loaded_on})")
+    for line in (voice.describe() if voice else []):
+        print(line)
     for problem in problems:
         print(f"WARNING: {problem}")
     if not tools_schema():
@@ -884,21 +907,30 @@ def chat(problems: list[str]):
     check.start()
     print("Type 'quit' to exit, 'clear' to reset the conversation, 'memory' to show what I remember.\n")
 
+    mode = "text"
     while True:
         try:
-            user_input = input("You: ").strip()
+            if voice:
+                if mode == "voice":
+                    voice.prompt_again("You: ")
+                mode, user_input = voice.next_input("You: ")
+                if mode == "eof":
+                    raise EOFError
+            else:
+                user_input = input("You: ").strip()
         except (KeyboardInterrupt, EOFError):
             print("\nExiting...")
             break
 
-        if user_input.lower() in ["quit", "exit"]:
+        command = user_input.lower().strip(" .!?")  ## Spoken commands arrive as "Quit." or "Clear."
+        if command in ["quit", "exit"]:
             print("Exiting...")
             break
-        if user_input.lower() == "clear":
+        if command == "clear":
             history = []
             print("History cleared (long-term memory kept; memory.md and persona.md reloaded).\n")
             continue
-        if user_input.lower() == "memory":
+        if command == "memory":
             print(load_memory() + "\n")
             continue
         if not user_input:
@@ -914,14 +946,24 @@ def chat(problems: list[str]):
                 print(f"WARNING: {startup['problem']}\n")
 
         printer = ReplyPrinter()
+        on_text = printer
+        if voice:
+            voice.stop_speaking()  ## You've moved on: don't finish reading the last reply over the new one
+            def on_text(piece, printer=printer):
+                printer(piece)
+                voice.on_text(piece)  ## Spoken sentence by sentence while she's still writing
         turn_start = len(history)
         try:
-            response = run_agent(user_input, history, on_text=printer)
+            response = run_agent(user_input, history, on_text=on_text, input_mode=mode)
+            if voice:
+                voice.end_reply(response, streamed=printer.started)
             printer.finish(response)
         except (KeyboardInterrupt, Exception) as e:
             ## Undo the half-finished turn: a tool call left without its result (or a dangling
             ## user message) would make every later request in this conversation malformed.
             del history[turn_start:]
+            if voice:
+                voice.stop_speaking()
             if isinstance(e, KeyboardInterrupt):
                 print("\n[Interrupted. Type 'quit' to exit.]\n")
             else:
