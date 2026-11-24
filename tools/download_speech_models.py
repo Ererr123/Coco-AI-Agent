@@ -8,8 +8,9 @@ Downloads the speech models Coco's voice uses into models/ (git-ignored). Skips 
   models/stt/   Parakeet TDT 0.6B v2, int8 (NVIDIA, CC-BY-4.0)                                      ~630 MB
   models/kokoro Kokoro-82M int8 + voices (Apache 2.0): the stand-in voice                           ~120 MB
 
-Coco's own voice goes in models/piper/ (en_US-coco-high.onnx + .onnx.json, exported by
-tools/train_coco_voice_colab.ipynb). It's picked up automatically.
+Coco's own voice goes in models/pocket/ (coco-pocket.yaml, coco-pocket.safetensors and
+coco-reference.wav: the export/ folder of tools/train_coco_voice_pocket_kaggle.ipynb). It's
+not downloadable, it's trained. It's picked up automatically.
 """
 import tarfile
 import urllib.request

@@ -131,6 +131,52 @@ the medium shape, so the high shape (old `--quality high`) is passed in a YAML f
 checks that every checkpoint weight fits before training. Checkpoints go to Google Drive every epoch,
 so a disconnect means re-run and it resumes. Pick the final checkpoint by ear (Listen cell).
 
+**Moved to Kaggle (2026-11-22):** Colab kept stopping (idle timeouts, disconnects, Drive storage).
+Training locally isn't realistic: PyTorch has no ROCm for the RX 5700 XT on Windows (AMD's Windows
+builds cover RX 7000/9000 only), DirectML handles this kind of training badly, and the CPU would be
+roughly 20-50x slower than a T4. `tools/train_coco_voice_kaggle.ipynb` runs **headless** (Save & Run
+All): each run trains for `TRAIN_HOURS` (8 by default: reported GPU run caps are 9-12 h and a run that
+hits the cap loses its output), stops right after an epoch's checkpoint is completely written, and leaves
+the checkpoint, an exported `.onnx` voice and four sample lines in its Output. The next run takes the
+previous Output as an input and continues from the highest epoch it finds. Same `/content/...` paths
+as Colab, so checkpoints move between the two. The Colab notebook is kept as a fallback.
+
+**Piper sounded robotic: switched to Pocket TTS (2026-11-23).** The finished Kaggle Piper run still
+sounded robotic, which is Piper's ceiling (a small VITS model). Kyutai's Pocket TTS (100M, CPU, Apache
+weights, gated on Hugging Face) sounds human and runs at about 2x real time on 4 CPU threads, with
+streaming. Copying Coco's voice from one 5-8 s clip with no training is the baseline
+(`src/loop/voice_results/pocket_samples/clone_ref_*`). Free models with fine emotion control
+(Chatterbox, Orpheus, Dia, Zonos, IndexTTS2) all need an NVIDIA GPU to keep up with conversation.
+Pocket TTS takes the mood from the reference clip instead, so Coco can keep a few clips for different moods.
+
+`tools/train_coco_voice_pocket_kaggle.ipynb` follows Kyutai's `training/README.md` (pocket-tts
+commit bc4d640) in two stages:
+1. Teacher: fine-tune the 24-layer `english_2026-09_24l` on her clips. Forced alignment with
+   wav2vec2, 64 rows per step, lr 2e-5, sampler head frozen.
+2. Student: distill the 6-layer `english_2026-09` from it. This is the teacher's own student, so
+   the frozen heads match, and it starts from the released weights.
+
+Their trainer assumes bf16, so on a T4 the notebook patches in fp16 with a gradient scaler and
+runs Muon and the aligner in fp32. It needs the Kaggle secret `HF_TOKEN`. Each run is headless,
+time-boxed with the trainer's STOP file, and resumable from the previous Output. A student made from
+an older teacher starts over. A CPU smoke test (Docker, 41 clips, 2 steps per stage, pretending to
+be a T4) passed end to end, export and listen files included.
+
+**First real run (2026-11-24): kept, and it's now her voice.** The dataset is metadata lines in the
+piper layout (`id.wav|text`), so the notebook now finds wavs by name wherever they are. 4202 clips
+(4.8 h) trained and 128 were held out. On T4 x2 the teacher ran at 0.36 steps/s, so 2000 steps took
+1.6 h. The student took 42 min, and the whole run about 2.5 h. The student copied the teacher well
+(held-out distill MSE 0.040 to 0.033). The teacher overfit, though. Held-out flow loss was best at
+step 250 (0.280, vs about 0.34 before training) and rose to 0.392 by step 2000. End-of-speech loss
+rose from 0.036 to 0.090. That's about 30 passes over the clips when about 4 was best. It still
+sounds like her, so this run is the one in use. If endings start cutting off or trailing on, retrain
+with `TEACHER_STEPS` around 400.
+
+In Coco it's the `pocket` engine (`--tts pocket`), picked by default when `models/pocket/` holds the
+export: `coco-pocket.yaml`, `coco-pocket.safetensors` and `coco-reference.wav`. On 4 threads it runs
+at about 2.8x real time (a 5.3 s sentence in 1.9 s). It's ready about 7 s after startup, mostly
+importing torch; the first run ever takes about 20 s.
+
 ## 8. The framework (built 2026-11-22)
 
 `src/loop/speech/`, used by `agent.py --speak` (she reads replies out loud) and `--voice` (she also
