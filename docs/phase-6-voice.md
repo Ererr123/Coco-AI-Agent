@@ -108,7 +108,11 @@ detection (step 4), where its turn-taking models earn their keep.
 - Wake word / VAD: [openWakeWord README](https://raw.githubusercontent.com/dscripka/openWakeWord/HEAD/README.md) · [openwakeword-train](https://community.home-assistant.io/t/tool-openwakeword-train-train-your-own-wake-words-locally-tts-examples-real-mic-negatives-onnx-tflite-export/1026289) · [LiveKit wakeword](https://docs.livekit.io/agents/multimodality/audio/wakeword.md)
 - Agent design: [Single vs multi-agent](https://dev.to/joancomadran/single-agent-vs-multi-agent-when-subagents-are-worth-it-5146) · [Multi-agent systems in 2026](https://www.flowhunt.io/blog/multi-agent-ai-system/)
 
-## 7. Coco's own voice (custom Piper voice, 2026-11-21)
+## 7. Coco's own voice (2026-11-21 to 11-24)
+
+**Where it ended up:** Pocket TTS fine-tuned on her clips (see "First real run" below). The Piper
+attempt that came first is kept here as history; its code and notebooks were removed (they're in git
+history before 2026-11-24).
 
 Kokoro's voices sounded too robotic. Chatterbox (voice cloning) sounded better but ran at 0.2-0.4x real
 time on this CPU (10-30 s per sentence), so it can't speak live. StyleTTS2 managed only 1.2-1.5x
@@ -116,7 +120,7 @@ real time (1.4-2.2 s to the first sentence, likely stutters while the LLM is als
 voice is a **Piper "high" voice fine-tuned on the source clips** (the user confirmed they come from a
 synthetic ElevenLabs voice). Piper runs comfortably in real time on a CPU.
 
-Dataset (`C:\Users\djpal\coco-voice-data`, outside OneDrive; tools in `tools/`):
+Dataset (`coco-voice-data` in the user's home folder, outside OneDrive; tools in `tools/`):
 1. `voice_dataset_select.py`: 35,177 source clips, one take per line, 1.5-12 s, speaker-checked with
    Chatterbox's voice encoder (one speaker: no natural clusters, silhouette 0.10), 3% outliers dropped,
    5.0 h kept.
@@ -125,7 +129,7 @@ Dataset (`C:\Users\djpal\coco-voice-data`, outside OneDrive; tools in `tools/`):
    8 clips rejected (unsure, accents), repeats capped: 4,330 clips, 4.93 h.
 3. `voice_dataset_package.py`: 22,050 Hz 16-bit mono, `name.wav|text`, zipped (647 MB).
 
-Training: `tools/train_coco_voice_colab.ipynb` on free Colab (T4). Piper piper1-gpl pinned to commit
+Training (removed): `tools/train_coco_voice_colab.ipynb` on free Colab (T4). Piper piper1-gpl pinned to commit
 39ac0a0, fine-tuned from the en_US lessac **high** checkpoint (epoch 2218). The new trainer's defaults are
 the medium shape, so the high shape (old `--quality high`) is passed in a YAML file, and a pre-flight cell
 checks that every checkpoint weight fits before training. Checkpoints go to Google Drive every epoch,
@@ -134,7 +138,7 @@ so a disconnect means re-run and it resumes. Pick the final checkpoint by ear (L
 **Moved to Kaggle (2026-11-22):** Colab kept stopping (idle timeouts, disconnects, Drive storage).
 Training locally isn't realistic: PyTorch has no ROCm for the RX 5700 XT on Windows (AMD's Windows
 builds cover RX 7000/9000 only), DirectML handles this kind of training badly, and the CPU would be
-roughly 20-50x slower than a T4. `tools/train_coco_voice_kaggle.ipynb` runs **headless** (Save & Run
+roughly 20-50x slower than a T4. `tools/train_coco_voice_kaggle.ipynb` (removed) ran **headless** (Save & Run
 All): each run trains for `TRAIN_HOURS` (8 by default: reported GPU run caps are 9-12 h and a run that
 hits the cap loses its output), stops right after an epoch's checkpoint is completely written, and leaves
 the checkpoint, an exported `.onnx` voice and four sample lines in its Output. The next run takes the
@@ -186,7 +190,7 @@ listens). `coco.bat --voice` installs `requirements-voice.txt` and downloads the
 | File | Does |
 |---|---|
 | `speakable.py` | Cuts the streamed reply into sentences as they finish; drops markdown, emoji and URLs; code blocks and tables are announced once ("I've put the code on screen"), lists read up to 6 items then "and N more, on screen" |
-| `tts.py` | Coco's Piper voice from `models/piper/` when it's there, Kokoro `af_heart` until then. Warmed up at startup |
+| `tts.py` | Coco's own Pocket TTS voice from `models/pocket/` when it's there, Kokoro `af_heart` otherwise. Warmed up at startup |
 | `speaker.py` | Makes the next sentence while the current one plays; `stop()` cuts her off within ~50 ms. One output stream for the session, so AirPods don't clip her first syllable |
 | `listen.py` | Wake word, then Silero VAD (command ends after 0.9 s of quiet, gives up after 6 s of nothing), then Parakeet. Keeps 0.5 s from before the wake word, so "hey Coco add milk" in one breath works |
 | `session.py` | Typed and spoken input in one queue; replies teed to the speaker; Enter on an empty line = talk without the wake word; "hey Coco" while she talks stops her; new input stops the old reply |
@@ -211,4 +215,4 @@ Logs: each turn now has `input_mode` ("text" or "voice"), to compare spoken and 
 
 **Still to do (plan section 4):** a live test on your voice and room; word error rate on ~30 of your
 recorded commands; the threshold for false wake-ups (an hour of normal room noise); CPU contention with
-llama-server while she talks; voice evals; Coco's Piper voice into `models/piper/` when training is done.
+llama-server while she talks; voice evals.

@@ -43,7 +43,7 @@ rem ---- 1a. Voice (only with --voice or --speak, e.g. "coco.bat --voice"): pack
 set "COCO_ARGS=%*"
 if not defined COCO_ARGS goto :voice_done
 echo %COCO_ARGS% | findstr /i /c:"--voice" /c:"--speak" >nul || goto :voice_done
-python -c "import sounddevice, sherpa_onnx, soxr, kokoro_onnx, piper, pocket_tts" >nul 2>nul
+python -c "import sounddevice, sherpa_onnx, soxr, kokoro_onnx, pocket_tts" >nul 2>nul
 if errorlevel 1 (
     echo Installing voice requirements...
     python -m pip install -r src\loop\requirements-voice.txt || goto :fail

@@ -858,7 +858,7 @@ def parse_args(argv=None):
     ap = argparse.ArgumentParser(description=f"Chat with {AGENT_NAME}.")
     ap.add_argument("--speak", action="store_true", help="Read replies out loud (you type)")
     ap.add_argument("--voice", action="store_true", help="Speak and listen: say 'hey Coco', or press Enter to talk")
-    ap.add_argument("--tts", default=None, help="Voice: pocket, piper, kokoro or kokoro:<voice> (default: Coco's own voice if installed, else Kokoro)")
+    ap.add_argument("--tts", default=None, help="Voice: pocket, kokoro or kokoro:<voice> (default: Coco's own voice if installed, else Kokoro)")
     ap.add_argument("--mic", default=None, help="Microphone, by part of its name (default: the Windows default)")
     ap.add_argument("--speaker", default=None, help="Output device, by part of its name (default: the Windows default)")
     return ap.parse_args(argv)

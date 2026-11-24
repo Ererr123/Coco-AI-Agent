@@ -1,4 +1,4 @@
-"""
+r"""
 Step 1 of training Coco's voice: pick the clips to train on.
 
 Reads the source clips, keeps 1.5-12 s ones (one take per line: "x (1).wav" and "x (2).wav" are

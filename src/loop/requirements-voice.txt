@@ -4,5 +4,4 @@ sherpa-onnx>=2.0     # wake word, voice activity detection, speech to text (Para
 soxr>=0.5            # resampling, for mics that can't record at 16 kHz
 pocket-tts>=4.0      # Coco's own voice (models/pocket/), pulls in CPU torch
 kokoro-onnx>=0.4     # stand-in voice when hers isn't installed
-piper-tts>=1.8       # the earlier Piper voice (models/piper/*.onnx), if any
 numpy

@@ -1,11 +1,12 @@
 """
-Step 3 of training Coco's voice: package the dataset for Piper training.
+Step 3 of training Coco's voice: package the dataset for upload. The zip is the Kaggle dataset that
+tools/train_coco_voice_pocket_kaggle.ipynb reads.
 
-Reads <data>/train.csv ("name|text") and <data>/wavs, writes 22,050 Hz 16-bit mono copies (what
-Piper "high" voices use) and a metadata.csv in Piper's format ("name.wav|text"), and zips them into
-<data>/coco-voice-dataset.zip for uploading to Google Drive. Run with the .venv-tts Python.
+Reads <data>/train.csv ("name|text") and <data>/wavs, writes 22,050 Hz 16-bit mono copies and a
+metadata.csv ("name.wav|text") into <data>/piper/ (the layout was first made for Piper, hence the
+name), and zips them into <data>/coco-voice-dataset.zip. Run with the .venv-tts Python.
 
-    .venv-tts\\Scripts\\python tools\\voice_dataset_package.py C:\\Users\\djpal\\coco-voice-data
+    .venv-tts\\Scripts\\python tools\\voice_dataset_package.py <data dir>
 """
 import argparse, os, zipfile
 import librosa, numpy as np, soundfile as sf

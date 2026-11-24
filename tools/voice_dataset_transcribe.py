@@ -5,13 +5,13 @@ Uses Parakeet TDT 0.6B (sherpa-onnx, CPU): ~14x real time here and the same word
 large-v3-turbo on a 40-clip check. Whisper ran at 0.6-2x because it pads every clip to a 30 s window.
 
 Writes, in <data>:
-  metadata.csv  every accepted clip, "file|text" (LJSpeech format, what Piper/StyleTTS2 training read)
+  metadata.csv  every accepted clip, "file|text" (LJSpeech format)
   rejected.csv  clips left out and why: a wrong transcript teaches the voice a wrong pronunciation
   train.csv     metadata.csv with each distinct sentence kept at most --max-repeats times (the source
                 has many template lines, "I have completed my work at your farm/shop/stall...")
 Resumable: clips already in metadata.csv or rejected.csv are skipped. Run with the .venv-tts Python.
 
-    .venv-tts\\Scripts\\python tools\\voice_dataset_transcribe.py C:\\Users\\djpal\\coco-voice-data
+    .venv-tts\\Scripts\\python tools\\voice_dataset_transcribe.py <data dir>
 """
 import argparse, collections, os, re, time
 import librosa, soundfile as sf, sherpa_onnx

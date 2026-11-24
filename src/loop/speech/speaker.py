@@ -64,10 +64,6 @@ class Speaker:
             self.pending = 0
             self.idle.set()
 
-    @property
-    def speaking(self) -> bool:
-        return not self.idle.is_set()
-
     def wait(self, timeout: float | None = None) -> bool:
         """Block until everything queued has been played (True) or the timeout passed (False)."""
         return self.idle.wait(timeout)
