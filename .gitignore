@@ -29,8 +29,14 @@ src/loop/voice_results/
 __pycache__/
 *.pyc
 .venv/
+.venv-*/
 venv/
 node_modules/
 
-# Downloaded MCP server binaries (e.g. tools/github-mcp-server/)
-/tools/
+# Downloaded MCP server binaries (e.g. tools/github-mcp-server/). The scripts and notebook here are ours: tracked
+/tools/*
+!/tools/*.py
+!/tools/*.ipynb
+
+# Downloaded models (speech etc.): large, re-downloadable
+models/

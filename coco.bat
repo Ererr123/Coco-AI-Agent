@@ -1,6 +1,6 @@
 @echo off
 rem ============================================================================
-rem  Double-click to start Coco.
+rem  Double-click to start Coco. "coco.bat --voice" to talk to her, "coco.bat --speak" to hear her replies.
 rem    1. Checks Python, Node.js (for the notes MCP server) and the Python packages,
 rem       and starts the SearXNG container for web search if Docker Desktop is running
 rem    2. Starts llama-server in its own minimized window (unless it's already running)
@@ -38,6 +38,18 @@ if errorlevel 1 (
     echo Installing Python requirements...
     python -m pip install -r src\loop\requirements.txt || goto :fail
 )
+
+rem ---- 1a. Voice (only with --voice or --speak, e.g. "coco.bat --voice"): packages and models ----
+set "COCO_ARGS=%*"
+if not defined COCO_ARGS goto :voice_done
+echo %COCO_ARGS% | findstr /i /c:"--voice" /c:"--speak" >nul || goto :voice_done
+python -c "import sounddevice, sherpa_onnx, soxr, kokoro_onnx, pocket_tts" >nul 2>nul
+if errorlevel 1 (
+    echo Installing voice requirements...
+    python -m pip install -r src\loop\requirements-voice.txt || goto :fail
+)
+python tools\download_speech_models.py || goto :fail
+:voice_done
 
 rem ---- 1b. Web search (optional): the coco-searxng Docker container, see docs\mcp-setup.md ----
 where docker >nul 2>nul
@@ -94,7 +106,7 @@ goto :wait_existing_loop
 rem ---- 4. Coco ----
 :run
 echo.
-python src\loop\agent.py
+python src\loop\agent.py %COCO_ARGS%
 set "COCO_EXIT=%errorlevel%"
 call :stop_llama
 if not "%COCO_EXIT%"=="0" (echo. & echo Coco exited with an error. & pause)
